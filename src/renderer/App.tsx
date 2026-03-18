@@ -28,6 +28,10 @@ import { vaultApi } from './vaultApi'
 
 type FormMode = 'create' | 'edit'
 type ImportDecision = 'keep' | 'skip'
+type ThemeMode = 'light' | 'dark'
+type NavSection = 'browse' | 'import' | 'repair' | 'portability'
+type WorkflowOverlay = 'entry' | 'import' | 'repair' | 'portability' | null
+type LayoutMode = 'grid' | 'list'
 
 type RelationshipDraft = {
   targetEntryId: string
@@ -166,6 +170,16 @@ function formatDate(value: string): string {
   }).format(new Date(value))
 }
 
+function formatCompactDate(value: string): string {
+  if (!value) {
+    return 'Never'
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium'
+  }).format(new Date(value))
+}
+
 function parseTags(raw: string): string[] {
   return raw
     .split(',')
@@ -285,6 +299,16 @@ function renderMarkdown(value: string): string {
 }
 
 function App(): ReactElement {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') {
+      return 'light'
+    }
+
+    return window.localStorage.getItem('code-vault-theme') === 'dark' ? 'dark' : 'light'
+  })
+  const [activeNavSection, setActiveNavSection] = useState<NavSection>('browse')
+  const [activeOverlay, setActiveOverlay] = useState<WorkflowOverlay>(null)
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('grid')
   const [entries, setEntries] = useState<VaultEntry[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [filters, setFilters] = useState<EntryFilters>(defaultFilters)
@@ -527,6 +551,11 @@ function App(): ReactElement {
   }, [])
 
   useEffect(() => {
+    document.documentElement.dataset.theme = themeMode
+    window.localStorage.setItem('code-vault-theme', themeMode)
+  }, [themeMode])
+
+  useEffect(() => {
     void refreshEntries(filters)
   }, [filters])
 
@@ -575,6 +604,26 @@ function App(): ReactElement {
     })
   }, [selectedEntry?.id])
 
+  function toggleThemeMode(): void {
+    setThemeMode((current) => (current === 'light' ? 'dark' : 'light'))
+  }
+
+  function closeOverlay(): void {
+    setActiveOverlay(null)
+    setActiveNavSection('browse')
+  }
+
+  function openOverlay(section: Exclude<WorkflowOverlay, 'entry' | null>): void {
+    setActiveNavSection(section)
+    setActiveOverlay(section)
+  }
+
+  function openCreateOverlay(): void {
+    resetCreateForm()
+    setActiveNavSection('browse')
+    setActiveOverlay('entry')
+  }
+
   function resetCreateForm(): void {
     setFormMode('create')
     setDraft(defaultEntryDraft)
@@ -587,6 +636,8 @@ function App(): ReactElement {
 
     setFormMode('edit')
     setDraft(normalizeDraft(selectedEntry))
+    setActiveOverlay('entry')
+    setActiveNavSection('browse')
   }
 
   function updateDraft(nextDraft: EntryDraft): void {
@@ -617,6 +668,8 @@ function App(): ReactElement {
 
       await Promise.all([refreshEntries(filters), refreshReferenceData()])
       setNotice(formMode === 'create' ? 'Entry saved.' : 'Entry updated.')
+      setActiveOverlay(null)
+      setActiveNavSection('browse')
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : 'Failed to save entry.')
     } finally {
@@ -882,6 +935,8 @@ function App(): ReactElement {
   async function handleInspectEntryBundle(): Promise<void> {
     setIsPortabilityBusy(true)
     setError('')
+    setActiveOverlay('portability')
+    setActiveNavSection('portability')
 
     try {
       const inspection = await vaultApi.inspectEntryBundle()
@@ -919,6 +974,8 @@ function App(): ReactElement {
       setLastPortabilityResult(summary)
       setNotice(summary)
       setEntryBundleInspection(null)
+      setActiveOverlay(null)
+      setActiveNavSection('browse')
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : 'Failed to import entry bundle.')
     } finally {
@@ -945,6 +1002,8 @@ function App(): ReactElement {
   async function handleInspectVaultBackup(): Promise<void> {
     setIsPortabilityBusy(true)
     setError('')
+    setActiveOverlay('portability')
+    setActiveNavSection('portability')
 
     try {
       const inspection = await vaultApi.inspectVaultBackup()
@@ -982,6 +1041,8 @@ function App(): ReactElement {
       setLastPortabilityResult(summary)
       setNotice(summary)
       setVaultBackupInspection(null)
+      setActiveOverlay(null)
+      setActiveNavSection('browse')
     } catch (restoreError) {
       setError(
         restoreError instanceof Error ? restoreError.message : 'Failed to restore vault backup.'
@@ -1199,6 +1260,8 @@ function App(): ReactElement {
     setIsScanningImport(true)
     setError('')
     setNotice('')
+    setActiveOverlay('import')
+    setActiveNavSection('import')
 
     try {
       const selection =
@@ -1221,6 +1284,8 @@ function App(): ReactElement {
     setIsScanningImport(true)
     setError('')
     setNotice('')
+    setActiveOverlay('import')
+    setActiveNavSection('import')
 
     try {
       const selection = await vaultApi.pickRootPath()
@@ -1318,6 +1383,8 @@ function App(): ReactElement {
         setNotice(
           `${successes.length} import${successes.length === 1 ? '' : 's'} added to the vault.`
         )
+        setActiveOverlay(null)
+        setActiveNavSection('browse')
       } else {
         const failureMessages = new Map(failures.map((failure) => [failure.tempId, failure.message]))
         setImportCandidates((current) =>
@@ -1447,6 +1514,8 @@ function App(): ReactElement {
       setNotice(
         `Bulk repair updated ${result.updatedEntries} entr${result.updatedEntries === 1 ? 'y' : 'ies'} and ${result.updatedPreviews} preview path${result.updatedPreviews === 1 ? '' : 's'}.`
       )
+      setActiveOverlay(null)
+      setActiveNavSection('browse')
     } catch (repairError) {
       setError(repairError instanceof Error ? repairError.message : 'Failed to run bulk repair.')
     } finally {
@@ -1560,25 +1629,97 @@ function App(): ReactElement {
     )
   }
 
+  const sectionCopy: Record<NavSection, { eyebrow: string; title: string; subtitle: string }> = {
+    browse: {
+      eyebrow: 'Vault',
+      title: 'A calmer way to revisit your code archive.',
+      subtitle: 'Search, sort, and scan the pieces you keep returning to.'
+    },
+    import: {
+      eyebrow: 'Import',
+      title: 'Bring existing projects into the vault with review first.',
+      subtitle: 'Scan folders, refine metadata, and save only what earns a card.'
+    },
+    repair: {
+      eyebrow: 'Repair',
+      title: 'Relink moved paths and clean up drift across your archive.',
+      subtitle: 'Repair broken references without losing the surrounding metadata.'
+    },
+    portability: {
+      eyebrow: 'Portability',
+      title: 'Back up the vault and move entries between machines.',
+      subtitle: 'Keep the archive durable with entry bundles and full-vault packages.'
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div>
-          <p className="eyebrow">Phase 4</p>
+        <div className="brand-block">
+          <p className="eyebrow">Local-first desktop vault</p>
           <h1>Code Vault</h1>
           <p className="lede">
-            A local visual catalog for snippets, experiments, mini-apps, and reusable code artifacts.
+            A visual archive for snippets, experiments, mini-apps, and reusable code artifacts.
           </p>
         </div>
 
-        <section className="panel">
+        <section className="panel nav-panel">
+          <p className="panel-label">Navigate</p>
+          <div className="nav-list">
+            <button
+              className={`nav-button ${activeOverlay === null ? 'active' : ''}`}
+              type="button"
+              onClick={() => {
+                setActiveNavSection('browse')
+                setActiveOverlay(null)
+              }}
+            >
+              <span>Browse vault</span>
+              <small>{entries.length} visible</small>
+            </button>
+            <button
+              className={`nav-button ${activeOverlay === 'import' ? 'active' : ''}`}
+              type="button"
+              onClick={() => openOverlay('import')}
+            >
+              <span>Import</span>
+              <small>{acceptedImportCount} ready</small>
+            </button>
+            <button
+              className={`nav-button ${activeOverlay === 'repair' ? 'active' : ''}`}
+              type="button"
+              onClick={() => openOverlay('repair')}
+            >
+              <span>Bulk repair</span>
+              <small>Path maintenance</small>
+            </button>
+            <button
+              className={`nav-button ${activeOverlay === 'portability' ? 'active' : ''}`}
+              type="button"
+              onClick={() => openOverlay('portability')}
+            >
+              <span>Portability</span>
+              <small>Export and restore</small>
+            </button>
+          </div>
+        </section>
+
+        <section className={`panel workflow-panel ${activeOverlay === 'import' ? 'active' : ''}`}>
           <div className="panel-heading">
-            <h2>Import</h2>
-            {importCandidates.length > 0 ? (
-              <button className="ghost-button" type="button" onClick={() => setImportCandidates([])}>
-                Clear review
+            <div>
+              <p className="panel-label">Import</p>
+              <h2>Review before saving</h2>
+            </div>
+            <div className="inline-actions">
+              {importCandidates.length > 0 ? (
+                <button className="ghost-button" type="button" onClick={() => setImportCandidates([])}>
+                  Clear review
+                </button>
+              ) : null}
+              <button className="ghost-button" type="button" onClick={closeOverlay}>
+                Close
               </button>
-            ) : null}
+            </div>
           </div>
           <p className="detail-notes">
             Scan existing folders or files, review detected metadata and preview ordering, then save
@@ -1618,9 +1759,12 @@ function App(): ReactElement {
           ) : null}
         </section>
 
-        <section className="panel">
+        <section className="panel browse-panel">
           <div className="panel-heading">
-            <h2>Browse Vault</h2>
+            <div>
+              <p className="panel-label">Quick filters</p>
+              <h2>Browse vault</h2>
+            </div>
             <button className="ghost-button" type="button" onClick={() => void refreshEntries(filters)}>
               Refresh
             </button>
@@ -1631,7 +1775,7 @@ function App(): ReactElement {
             <input
               value={filters.query}
               onChange={(event) => setFilters((current) => ({ ...current, query: event.target.value }))}
-              placeholder="Search by title or tag"
+              placeholder="Search by title, tag, or stack"
             />
           </label>
 
@@ -1743,9 +1887,15 @@ function App(): ReactElement {
           </div>
         </section>
 
-        <section className="panel">
+        <section className={`panel workflow-panel ${activeOverlay === 'repair' ? 'active' : ''}`}>
           <div className="panel-heading">
-            <h2>Bulk Repair</h2>
+            <div>
+              <p className="panel-label">Repair</p>
+              <h2>Bulk repair</h2>
+            </div>
+            <button className="ghost-button" type="button" onClick={closeOverlay}>
+              Close
+            </button>
           </div>
           <p className="detail-notes">
             Replace an old root prefix with a new one across matching entries and preview paths.
@@ -1777,9 +1927,15 @@ function App(): ReactElement {
           </form>
         </section>
 
-        <section className="panel">
+        <section className={`panel workflow-panel ${activeOverlay === 'portability' ? 'active' : ''}`}>
           <div className="panel-heading">
-            <h2>Portability</h2>
+            <div>
+              <p className="panel-label">Portability</p>
+              <h2>Export and restore</h2>
+            </div>
+            <button className="ghost-button" type="button" onClick={closeOverlay}>
+              Close
+            </button>
           </div>
           <p className="detail-notes">
             Create portable entry bundles, full vault backups, and restore packages on another
@@ -1816,9 +1972,12 @@ function App(): ReactElement {
           ) : null}
         </section>
 
-        <section className="panel">
+        <section className={`panel workflow-panel entry-workflow-panel ${activeOverlay === 'entry' ? 'active' : ''}`}>
           <div className="panel-heading">
-            <h2>{formMode === 'create' ? 'Add Entry' : 'Edit Entry'}</h2>
+            <div>
+              <p className="panel-label">{formMode === 'create' ? 'New entry' : 'Edit entry'}</p>
+              <h2>{formMode === 'create' ? 'Compose a new card' : 'Refine this entry'}</h2>
+            </div>
             <div className="inline-actions">
               <button className="ghost-button" type="button" onClick={() => void handleRefreshMetadata()}>
                 {isDetectingMetadata ? 'Detecting...' : 'Detect metadata'}
@@ -1828,6 +1987,9 @@ function App(): ReactElement {
                   New entry
                 </button>
               ) : null}
+              <button className="ghost-button" type="button" onClick={closeOverlay}>
+                Close
+              </button>
             </div>
           </div>
 
@@ -2059,19 +2221,51 @@ function App(): ReactElement {
       </aside>
 
       <main className="content">
+        <header className="topbar">
+          <div className="topbar-copy">
+            <p className="eyebrow">{sectionCopy[activeNavSection].eyebrow}</p>
+            <h2>{sectionCopy[activeNavSection].title}</h2>
+            <p className="topbar-subtitle">{sectionCopy[activeNavSection].subtitle}</p>
+          </div>
+          <div className="topbar-actions">
+            <button className="theme-toggle" type="button" onClick={toggleThemeMode}>
+              <span>{themeMode === 'light' ? 'Dark' : 'Light'} mode</span>
+            </button>
+            <button className="primary-button topbar-button" type="button" onClick={openCreateOverlay}>
+              New entry
+            </button>
+          </div>
+        </header>
+
         <section className="toolbar">
           <div>
             <p className="eyebrow">Vault overview</p>
             <h2>{entries.length} visible item{entries.length === 1 ? '' : 's'}</h2>
           </div>
           <div className="status-area">
+            <div className="view-switch">
+              <button
+                className={`ghost-button ${layoutMode === 'grid' ? 'active-toggle' : ''}`}
+                type="button"
+                onClick={() => setLayoutMode('grid')}
+              >
+                Grid
+              </button>
+              <button
+                className={`ghost-button ${layoutMode === 'list' ? 'active-toggle' : ''}`}
+                type="button"
+                onClick={() => setLayoutMode('list')}
+              >
+                List
+              </button>
+            </div>
             {error ? <p className="status-message error">{error}</p> : null}
             {!error && notice ? <p className="status-message">{notice}</p> : null}
           </div>
         </section>
 
         {entryBundleInspection ? (
-          <section className="import-review-panel portability-review-panel">
+          <section className="import-review-panel portability-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Phase 5 portability review</p>
@@ -2159,7 +2353,7 @@ function App(): ReactElement {
         ) : null}
 
         {vaultBackupInspection ? (
-          <section className="import-review-panel portability-review-panel">
+          <section className="import-review-panel portability-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Phase 5 portability review</p>
@@ -2247,7 +2441,7 @@ function App(): ReactElement {
         ) : null}
 
         {importCandidates.length > 0 ? (
-          <section className="import-review-panel">
+          <section className="import-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Phase 4 import review</p>
@@ -2571,11 +2765,11 @@ function App(): ReactElement {
             ) : null}
 
             {!isLoading && entries.length > 0 ? (
-              <div className="card-grid">
+              <div className={`card-grid ${layoutMode === 'list' ? 'list' : ''}`}>
                 {entries.map((entry) => (
                   <article
                     key={entry.id}
-                    className={`entry-card ${selectedId === entry.id ? 'selected' : ''}`}
+                    className={`entry-card ${layoutMode === 'list' ? 'list' : ''} ${selectedId === entry.id ? 'selected' : ''}`}
                   >
                     <div className="entry-card-shell" onClick={() => setSelectedId(entry.id)}>
                       {entry.previewImagePath && !entry.previewImages[0]?.isMissing ? (
