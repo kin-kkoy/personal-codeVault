@@ -10,6 +10,9 @@ Code Vault is a local-first desktop app for storing, organizing, and visually re
 ## Current target
 Build Phase 1 / MVP only.
 
+## Current runtime
+Tauri 2 with React, TypeScript, and SQLite.
+
 ## MVP includes
 - manual item creation
 - preview image attachment

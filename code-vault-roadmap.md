@@ -126,7 +126,7 @@ Optional if easy:
 ## Todo Breakdown
 
 ### Foundation
-- choose stack
+- set up Tauri desktop shell
 - create project
 - set up DB
 - define schema

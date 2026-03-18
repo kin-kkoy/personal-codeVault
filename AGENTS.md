@@ -44,7 +44,7 @@ Build a usable local visual catalog for small code projects/snippets with:
 
 ## Technical direction
 Preferred stack unless there is a strong reason otherwise:
-- Tauri
+- Tauri 2
 - React
 - TypeScript
 - SQLite

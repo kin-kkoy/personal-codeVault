@@ -329,7 +329,7 @@ This is a suggested direction, not a hard requirement.
 Desktop app
 
 ### Recommended Stack
-- Tauri or Electron
+- Tauri
 - React for UI
 - SQLite for local database
 
