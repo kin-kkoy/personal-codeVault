@@ -153,6 +153,7 @@ struct EntryOption {
     r#type: String,
     status: String,
     is_template: bool,
+    relationship_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2064,9 +2065,9 @@ fn list_entry_options(app: AppHandle) -> CommandResult<Vec<EntryOption>> {
     let mut statement = connection
         .prepare(
             "
-            SELECT id, title, type, status, is_template
-            FROM entries
-            WHERE status != 'archived'
+            SELECT id, title, type, status, is_template,
+              (SELECT COUNT(*) FROM entry_relationships WHERE source_entry_id = e.id OR target_entry_id = e.id) AS relationship_count
+            FROM entries e
             ORDER BY is_pinned DESC, is_favorite DESC, LOWER(title) ASC
             ",
         )
@@ -2080,6 +2081,7 @@ fn list_entry_options(app: AppHandle) -> CommandResult<Vec<EntryOption>> {
                 r#type: row.get("type")?,
                 status: row.get("status")?,
                 is_template: bool_from_sql(row.get("is_template")?),
+                relationship_count: row.get("relationship_count")?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -3819,7 +3821,7 @@ fn pick_entry_file() -> FileSelection {
 #[tauri::command]
 fn import_preview_image(app: AppHandle) -> CommandResult<FileSelection> {
     let path = FileDialog::new()
-        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .add_filter("Media", &["png", "jpg", "jpeg", "gif", "webp", "mp4", "webm"])
         .pick_file();
 
     let Some(source_path) = path else {

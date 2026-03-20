@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { defaultEntryDraft, defaultFilters } from '@shared/defaults'
 import {
@@ -25,13 +25,27 @@ import {
   type VaultEntryInput
 } from '@shared/types'
 import { vaultApi } from './vaultApi'
+import { HelpGuide } from './HelpGuide'
+import {
+  escapeHtml,
+  formatCompactDate,
+  formatDate,
+  getRelationshipLabel,
+  normalizeDraft,
+  parseTags,
+  renderInlineMarkdown,
+  renderMarkdown,
+  syncPreviewPath,
+  toEntryInput,
+  withPreviewOrdering
+} from '@shared/utils'
 
 type FormMode = 'create' | 'edit'
 type ImportDecision = 'keep' | 'skip'
 type ThemeMode = 'light' | 'dark'
 type NavSection = 'browse' | 'import' | 'repair' | 'portability'
-type WorkflowOverlay = 'entry' | 'import' | 'repair' | 'portability' | null
-type LayoutMode = 'grid' | 'list'
+type WorkflowOverlay = 'entry' | null
+type DockTabId = 'import' | 'bulkRepair' | 'portability'
 
 type RelationshipDraft = {
   targetEntryId: string
@@ -48,94 +62,11 @@ type BulkRepairDraft = {
   newPrefix: string
 }
 
-type InlineDraft = {
-  title: string
-  description: string
-  tags: string[]
-  stack: string
-  status: EntryDraft['status']
-  notes: string
-  goodFor: string
-  setupNotes: string
-  dependencyNotes: string
-}
-
 type ImportCandidateState = ImportCandidate & {
   decision: ImportDecision
   activePreviewPath: string
   quickPreview: QuickFilePreview | null
   importError: string
-}
-
-function withPreviewOrdering(images: PreviewImage[]): PreviewImage[] {
-  return images.map((image, index) => ({
-    ...image,
-    order: index,
-    isMissing: Boolean(image.path) && Boolean(image.isMissing)
-  }))
-}
-
-function syncPreviewPath<T extends { previewImages: PreviewImage[]; previewImagePath: string }>(
-  value: T
-): T {
-  const previewImages = withPreviewOrdering(value.previewImages)
-  return {
-    ...value,
-    previewImages,
-    previewImagePath: previewImages[0]?.path ?? ''
-  }
-}
-
-function normalizeDraft(entry?: VaultEntry | null): EntryDraft {
-  if (!entry) {
-    return defaultEntryDraft
-  }
-
-  return {
-    title: entry.title,
-    description: entry.description,
-    type: entry.type,
-    tags: entry.tags,
-    stack: entry.stack,
-    rootPath: entry.rootPath,
-    entryFilePath: entry.entryFilePath,
-    previewImagePath: entry.previewImagePath,
-    previewImages: entry.previewImages,
-    isFavorite: entry.isFavorite,
-    isPinned: entry.isPinned,
-    isTemplate: entry.isTemplate,
-    notes: entry.notes,
-    goodFor: entry.goodFor,
-    setupNotes: entry.setupNotes,
-    dependencyNotes: entry.dependencyNotes,
-    runCommand: entry.runCommand,
-    status: entry.status
-  }
-}
-
-function toEntryInput(entry: EntryDraft | VaultEntry | ImportCandidate): VaultEntryInput {
-  const previewImages = withPreviewOrdering(entry.previewImages)
-
-  return {
-    title: entry.title,
-    description: entry.description,
-    type: entry.type,
-    tags: entry.tags,
-    stack: entry.stack,
-    rootPath: entry.rootPath,
-    entryFilePath: entry.entryFilePath,
-    previewImagePath: previewImages[0]?.path ?? entry.previewImagePath ?? '',
-    previewImages,
-    isFavorite: entry.isFavorite,
-    isPinned: entry.isPinned,
-    isTemplate: entry.isTemplate,
-    notes: entry.notes,
-    goodFor: entry.goodFor,
-    setupNotes: entry.setupNotes,
-    dependencyNotes: entry.dependencyNotes,
-    runCommand: entry.runCommand,
-    status: entry.status
-  }
 }
 
 function getImportCandidateInput(candidate: ImportCandidateState): ImportCandidate {
@@ -145,179 +76,62 @@ function getImportCandidateInput(candidate: ImportCandidateState): ImportCandida
   }
 }
 
-function toInlineDraft(entry: VaultEntry | null): InlineDraft {
-  return {
-    title: entry?.title ?? '',
-    description: entry?.description ?? '',
-    tags: entry?.tags ?? [],
-    stack: entry?.stack ?? '',
-    status: entry?.status ?? 'draft',
-    notes: entry?.notes ?? '',
-    goodFor: entry?.goodFor ?? '',
-    setupNotes: entry?.setupNotes ?? '',
-    dependencyNotes: entry?.dependencyNotes ?? ''
-  }
-}
-
-function formatDate(value: string): string {
-  if (!value) {
-    return 'Never'
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short'
-  }).format(new Date(value))
-}
-
-function formatCompactDate(value: string): string {
-  if (!value) {
-    return 'Never'
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium'
-  }).format(new Date(value))
-}
-
-function parseTags(raw: string): string[] {
-  return raw
-    .split(',')
-    .map((tag) => tag.trim())
-    .filter(Boolean)
-}
-
 function getPreviewSrc(path: string): string {
   return convertFileSrc(path)
 }
 
-function getRelationshipLabel(value: RelationshipType): string {
-  return value.replaceAll('-', ' ')
+const videoExtensions = new Set(['.mp4', '.webm'])
+
+function isVideoPath(path: string): boolean {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase()
+  return videoExtensions.has(ext)
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
+function PreviewMedia({ src, alt, className }: { src: string; alt: string; className?: string }): ReactElement {
+  if (isVideoPath(src)) {
+    return (
+      <video
+        autoPlay
+        loop
+        muted
+        playsInline
+        className={className}
+        src={getPreviewSrc(src)}
+      />
+    )
+  }
+  return <img alt={alt} className={className} src={getPreviewSrc(src)} />
 }
 
-function renderInlineMarkdown(value: string): string {
-  return value
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-}
-
-function renderMarkdown(value: string): string {
-  const escaped = escapeHtml(value)
-  const lines = escaped.split('\n')
-  const output: string[] = []
-  let inList = false
-  let inCode = false
-  let paragraph: string[] = []
-
-  function flushParagraph(): void {
-    if (paragraph.length > 0) {
-      output.push(`<p>${renderInlineMarkdown(paragraph.join(' '))}</p>`)
-      paragraph = []
-    }
+function loadStored<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (raw === null) return fallback
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
   }
-
-  function closeList(): void {
-    if (inList) {
-      output.push('</ul>')
-      inList = false
-    }
-  }
-
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd()
-
-    if (line.startsWith('```')) {
-      flushParagraph()
-      closeList()
-      if (inCode) {
-        output.push('</code></pre>')
-        inCode = false
-      } else {
-        output.push('<pre><code>')
-        inCode = true
-      }
-      continue
-    }
-
-    if (inCode) {
-      output.push(`${line}\n`)
-      continue
-    }
-
-    const trimmed = line.trim()
-    if (!trimmed) {
-      flushParagraph()
-      closeList()
-      continue
-    }
-
-    if (trimmed.startsWith('# ')) {
-      flushParagraph()
-      closeList()
-      output.push(`<h4>${renderInlineMarkdown(trimmed.slice(2))}</h4>`)
-      continue
-    }
-
-    if (trimmed.startsWith('## ')) {
-      flushParagraph()
-      closeList()
-      output.push(`<h5>${renderInlineMarkdown(trimmed.slice(3))}</h5>`)
-      continue
-    }
-
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      flushParagraph()
-      if (!inList) {
-        output.push('<ul>')
-        inList = true
-      }
-      output.push(`<li>${renderInlineMarkdown(trimmed.slice(2))}</li>`)
-      continue
-    }
-
-    paragraph.push(trimmed)
-  }
-
-  flushParagraph()
-  closeList()
-
-  if (inCode) {
-    output.push('</code></pre>')
-  }
-
-  return output.join('')
 }
 
 function App(): ReactElement {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === 'undefined') {
-      return 'light'
+      return 'dark'
     }
 
-    return window.localStorage.getItem('code-vault-theme') === 'dark' ? 'dark' : 'light'
+    const stored = window.localStorage.getItem('code-vault-theme')
+    return stored === 'light' ? 'light' : 'dark'
   })
   const [activeNavSection, setActiveNavSection] = useState<NavSection>('browse')
   const [activeOverlay, setActiveOverlay] = useState<WorkflowOverlay>(null)
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('grid')
   const [entries, setEntries] = useState<VaultEntry[]>([])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [filters, setFilters] = useState<EntryFilters>(defaultFilters)
+  const [selectedId, setSelectedId] = useState<string | null>(() => loadStored('cv-selected-id', null))
+  const [filters, setFilters] = useState<EntryFilters>(() => loadStored('cv-filters', defaultFilters))
   const [draft, setDraft] = useState<EntryDraft>(defaultEntryDraft)
-  const [inlineDraft, setInlineDraft] = useState<InlineDraft>(toInlineDraft(null))
   const [formMode, setFormMode] = useState<FormMode>('create')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
-  const [isSavingInline, setIsSavingInline] = useState(false)
   const [isDuplicating, setIsDuplicating] = useState(false)
   const [isCreatingRelationship, setIsCreatingRelationship] = useState(false)
   const [isDetectingMetadata, setIsDetectingMetadata] = useState(false)
@@ -357,6 +171,65 @@ function App(): ReactElement {
     useState<QuickPreviewInspection | null>(null)
   const [detailPreviewPath, setDetailPreviewPath] = useState('')
   const [detailPreview, setDetailPreview] = useState<QuickFilePreview | null>(null)
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadStored('cv-sidebar-width', 278))
+  const [detailWidth, setDetailWidth] = useState(() =>
+    loadStored('cv-detail-width', typeof window !== 'undefined' && window.innerWidth >= 1440 ? 500 : 360)
+  )
+  const [showHelpGuide, setShowHelpGuide] = useState<string | null>(null)
+  const [compactGrid, setCompactGrid] = useState(() => loadStored('cv-compact-grid', false))
+  const [openAccordion, setOpenAccordion] = useState<string | null>(null)
+  const [carouselInterval, setCarouselInterval] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null
+    const stored = window.localStorage.getItem('code-vault-carousel-speed')
+    if (stored === null) return null
+    const val = Number(stored)
+    return val > 0 ? val : null
+  })
+  const [showFilePreviewModal, setShowFilePreviewModal] = useState(false)
+  const [formError, setFormError] = useState('')
+  const [openDockTabs, setOpenDockTabs] = useState<DockTabId[]>(() => loadStored('cv-dock-tabs', []))
+  const [activeDockTab, setActiveDockTab] = useState<DockTabId | null>(() => loadStored('cv-dock-active', null))
+  const [isDockCollapsed, setIsDockCollapsed] = useState(() => loadStored('cv-dock-collapsed', true))
+  const [dockLayoutMode, setDockLayoutMode] = useState<'focused' | 'split'>(() => loadStored('cv-dock-layout', 'focused'))
+  const [dockHeight, setDockHeight] = useState(() => loadStored('cv-dock-height', 280))
+  const [showHealthModal, setShowHealthModal] = useState(false)
+  const [isCarouselLocked, setIsCarouselLocked] = useState(false)
+  const isInitialLoadRef = useRef(true)
+  const formRef = useRef<HTMLFormElement>(null)
+  const appShellRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLElement>(null)
+  const carouselDirectionRef = useRef<'next' | 'prev'>('next')
+
+  const startResize = useCallback(
+    (direction: 'left' | 'right', startX: number, startWidth: number): void => {
+      let currentWidth = startWidth
+      function onMouseMove(e: MouseEvent): void {
+        const delta = direction === 'left' ? e.clientX - startX : startX - e.clientX
+        currentWidth = Math.min(
+          direction === 'left' ? 400 : 500,
+          Math.max(direction === 'left' ? 180 : 220, startWidth + delta)
+        )
+        if (direction === 'left' && appShellRef.current) {
+          appShellRef.current.style.gridTemplateColumns = `${currentWidth}px 6px minmax(0, 1fr)`
+        } else if (direction === 'right' && contentRef.current) {
+          contentRef.current.style.gridTemplateColumns = `1fr 6px ${currentWidth}px`
+        }
+      }
+      function onMouseUp(): void {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.documentElement.classList.remove('is-resizing')
+        document.documentElement.style.cursor = ''
+        if (direction === 'left') setSidebarWidth(currentWidth)
+        else setDetailWidth(currentWidth)
+      }
+      document.documentElement.classList.add('is-resizing')
+      document.documentElement.style.cursor = 'col-resize'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    []
+  )
 
   const selectedEntry = useMemo(
     () => entries.find((entry) => entry.id === selectedId) ?? null,
@@ -377,6 +250,34 @@ function App(): ReactElement {
 
   const pinnedEntries = useMemo(() => entries.filter((entry) => entry.isPinned), [entries])
 
+  function navigatePreview(direction: 'prev' | 'next'): void {
+    if (!selectedEntry || selectedEntry.previewImages.length === 0) {
+      return
+    }
+    carouselDirectionRef.current = direction
+    const images = selectedEntry.previewImages
+    setSelectedPreviewId((currentId) => {
+      const currentIndex = images.findIndex((img) => img.id === currentId)
+      const nextIndex =
+        direction === 'prev'
+          ? (currentIndex - 1 + images.length) % images.length
+          : (currentIndex + 1) % images.length
+      return images[nextIndex].id
+    })
+  }
+
+  const healthSummary = useMemo(() => {
+    if (!pathHealth) {
+      return 'Unknown'
+    }
+    const issues: string[] = []
+    if (!pathHealth.rootPathExists) issues.push('root missing')
+    if (!pathHealth.entryFileExists) issues.push('entry file missing')
+    if (pathHealth.missingPreviewImages.length > 0)
+      issues.push(`${pathHealth.missingPreviewImages.length} missing preview(s)`)
+    return issues.length === 0 ? 'Healthy' : issues.join(', ')
+  }, [pathHealth])
+
   const relatedTargetOptions = useMemo(
     () => entryOptions.filter((entry) => entry.id !== selectedId),
     [entryOptions, selectedId]
@@ -392,6 +293,16 @@ function App(): ReactElement {
     [importCandidates]
   )
 
+  const relationshipCountMap = useMemo(
+    () => new Map(entryOptions.map((e) => [e.id, e.relationshipCount])),
+    [entryOptions]
+  )
+
+  const archivedCount = useMemo(
+    () => entryOptions.filter((e) => e.status === 'archived').length,
+    [entryOptions]
+  )
+
   async function refreshEntries(nextFilters: EntryFilters = filters): Promise<void> {
     setIsLoading(true)
     setError('')
@@ -402,6 +313,11 @@ function App(): ReactElement {
       setSelectedId((current) => {
         if (current && nextEntries.some((entry) => entry.id === current)) {
           return current
+        }
+
+        if (isInitialLoadRef.current) {
+          isInitialLoadRef.current = false
+          return null
         }
 
         return nextEntries[0]?.id ?? null
@@ -556,8 +472,75 @@ function App(): ReactElement {
   }, [themeMode])
 
   useEffect(() => {
+    if (carouselInterval === null) {
+      window.localStorage.removeItem('code-vault-carousel-speed')
+    } else {
+      window.localStorage.setItem('code-vault-carousel-speed', String(carouselInterval))
+    }
+  }, [carouselInterval])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-selected-id', JSON.stringify(selectedId))
+  }, [selectedId])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-filters', JSON.stringify(filters))
+  }, [filters])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-sidebar-width', JSON.stringify(sidebarWidth))
+  }, [sidebarWidth])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-detail-width', JSON.stringify(detailWidth))
+  }, [detailWidth])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-compact-grid', JSON.stringify(compactGrid))
+  }, [compactGrid])
+
+  useEffect(() => {
+    window.localStorage.setItem('cv-dock-tabs', JSON.stringify(openDockTabs))
+    window.localStorage.setItem('cv-dock-active', JSON.stringify(activeDockTab))
+    window.localStorage.setItem('cv-dock-collapsed', JSON.stringify(isDockCollapsed))
+    window.localStorage.setItem('cv-dock-layout', JSON.stringify(dockLayoutMode))
+    window.localStorage.setItem('cv-dock-height', JSON.stringify(dockHeight))
+  }, [openDockTabs, activeDockTab, isDockCollapsed, dockLayoutMode, dockHeight])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 3000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    if (!error) return
+    const timer = setTimeout(() => setError(''), 5000)
+    return () => clearTimeout(timer)
+  }, [error])
+
+  const filtersInitRef = useRef(true)
+  useEffect(() => {
+    if (filtersInitRef.current) {
+      filtersInitRef.current = false
+      return
+    }
     void refreshEntries(filters)
   }, [filters])
+
+  useEffect(() => {
+    if (carouselInterval === null || isCarouselLocked || !selectedEntry || selectedEntry.previewImages.length < 2) return
+    const images = selectedEntry.previewImages
+    const timer = setInterval(() => {
+      carouselDirectionRef.current = 'next'
+      setSelectedPreviewId((currentId) => {
+        const currentIndex = images.findIndex((img) => img.id === currentId)
+        const nextIndex = (currentIndex + 1) % images.length
+        return images[nextIndex].id
+      })
+    }, carouselInterval * 1000)
+    return () => clearInterval(timer)
+  }, [carouselInterval, isCarouselLocked, selectedEntry?.id, selectedEntry?.previewImages.length])
 
   useEffect(() => {
     if (formMode === 'edit' && selectedEntry) {
@@ -576,7 +559,6 @@ function App(): ReactElement {
         newProjectName: '',
         destinationParentPath: ''
       })
-      setInlineDraft(toInlineDraft(null))
       setSelectedPreviewId(null)
       setRelationshipDraft({
         targetEntryId: '',
@@ -586,7 +568,6 @@ function App(): ReactElement {
     }
 
     setSelectedPreviewId(selectedEntry.previewImages[0]?.id ?? null)
-    setInlineDraft(toInlineDraft(selectedEntry))
     setDuplicateDraft({
       newProjectName: `${selectedEntry.title} Copy`,
       destinationParentPath: ''
@@ -613,13 +594,60 @@ function App(): ReactElement {
     setActiveNavSection('browse')
   }
 
-  function openOverlay(section: Exclude<WorkflowOverlay, 'entry' | null>): void {
-    setActiveNavSection(section)
-    setActiveOverlay(section)
+  function openDockTab(tabId: DockTabId): void {
+    setOpenDockTabs((current) => (current.includes(tabId) ? current : [...current, tabId]))
+    setActiveDockTab(tabId)
+    setIsDockCollapsed(false)
+    const navMap: Record<DockTabId, NavSection> = { import: 'import', bulkRepair: 'repair', portability: 'portability' }
+    setActiveNavSection(navMap[tabId])
   }
+
+  function closeDockTab(tabId: DockTabId): void {
+    setOpenDockTabs((current) => {
+      const next = current.filter((id) => id !== tabId)
+      if (next.length === 0) {
+        setIsDockCollapsed(true)
+        setActiveDockTab(null)
+        setActiveNavSection('browse')
+      } else if (activeDockTab === tabId) {
+        setActiveDockTab(next[next.length - 1])
+      }
+      return next
+    })
+  }
+
+  function toggleDockCollapse(): void {
+    setIsDockCollapsed((current) => !current)
+  }
+
+  function focusDockTab(tabId: DockTabId): void {
+    setActiveDockTab(tabId)
+    if (isDockCollapsed) setIsDockCollapsed(false)
+  }
+
+  const startDockResize = useCallback(
+    (startY: number, startHeight: number): void => {
+      function onMouseMove(e: MouseEvent): void {
+        const delta = startY - e.clientY
+        setDockHeight(Math.min(600, Math.max(120, startHeight + delta)))
+      }
+      function onMouseUp(): void {
+        document.removeEventListener('mousemove', onMouseMove)
+        document.removeEventListener('mouseup', onMouseUp)
+        document.documentElement.classList.remove('is-resizing')
+        document.documentElement.style.cursor = ''
+      }
+      document.documentElement.classList.add('is-resizing')
+      document.documentElement.style.cursor = 'row-resize'
+      document.addEventListener('mousemove', onMouseMove)
+      document.addEventListener('mouseup', onMouseUp)
+    },
+    []
+  )
 
   function openCreateOverlay(): void {
     resetCreateForm()
+    setFormError('')
     setActiveNavSection('browse')
     setActiveOverlay('entry')
   }
@@ -635,6 +663,7 @@ function App(): ReactElement {
     }
 
     setFormMode('edit')
+    setFormError('')
     setDraft(normalizeDraft(selectedEntry))
     setActiveOverlay('entry')
     setActiveNavSection('browse')
@@ -644,17 +673,25 @@ function App(): ReactElement {
     setDraft(syncPreviewPath(nextDraft))
   }
 
+  function handleAccordionToggle(id: string, isOpen: boolean): void {
+    if (isOpen) {
+      setOpenAccordion(id)
+    } else {
+      setOpenAccordion((current) => (current === id ? null : current))
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
     setNotice('')
 
     if (!draft.title.trim() || !draft.rootPath.trim()) {
-      setError('Title and root path are required.')
+      setFormError('Title and root path are required.')
       return
     }
 
     setIsSaving(true)
-    setError('')
+    setFormError('')
 
     try {
       if (formMode === 'create') {
@@ -674,36 +711,6 @@ function App(): ReactElement {
       setError(saveError instanceof Error ? saveError.message : 'Failed to save entry.')
     } finally {
       setIsSaving(false)
-    }
-  }
-
-  async function handleSaveInline(): Promise<void> {
-    if (!selectedEntry) {
-      return
-    }
-
-    setIsSavingInline(true)
-    setError('')
-
-    try {
-      const updated = await vaultApi.patchEntry(selectedEntry.id, {
-        title: inlineDraft.title,
-        description: inlineDraft.description,
-        tags: inlineDraft.tags,
-        stack: inlineDraft.stack,
-        status: inlineDraft.status,
-        notes: inlineDraft.notes,
-        goodFor: inlineDraft.goodFor,
-        setupNotes: inlineDraft.setupNotes,
-        dependencyNotes: inlineDraft.dependencyNotes
-      })
-      setSelectedId(updated.id)
-      await Promise.all([refreshEntries(filters), refreshReferenceData()])
-      setNotice('Quick changes saved.')
-    } catch (patchError) {
-      setError(patchError instanceof Error ? patchError.message : 'Failed to save inline changes.')
-    } finally {
-      setIsSavingInline(false)
     }
   }
 
@@ -827,6 +834,20 @@ function App(): ReactElement {
     await Promise.all([refreshEntries(filters), refreshReferenceData()])
   }
 
+  async function handleUnarchive(): Promise<void> {
+    if (!selectedEntry) {
+      return
+    }
+
+    try {
+      await vaultApi.patchEntry(selectedEntry.id, { status: 'draft' })
+      setNotice('Entry unarchived.')
+      await Promise.all([refreshEntries(filters), refreshReferenceData()])
+    } catch (unarchiveError) {
+      setError(unarchiveError instanceof Error ? unarchiveError.message : 'Failed to unarchive entry.')
+    }
+  }
+
   async function handleDelete(): Promise<void> {
     if (!selectedEntry) {
       return
@@ -935,8 +956,7 @@ function App(): ReactElement {
   async function handleInspectEntryBundle(): Promise<void> {
     setIsPortabilityBusy(true)
     setError('')
-    setActiveOverlay('portability')
-    setActiveNavSection('portability')
+    openDockTab('portability')
 
     try {
       const inspection = await vaultApi.inspectEntryBundle()
@@ -974,8 +994,7 @@ function App(): ReactElement {
       setLastPortabilityResult(summary)
       setNotice(summary)
       setEntryBundleInspection(null)
-      setActiveOverlay(null)
-      setActiveNavSection('browse')
+      closeDockTab('portability')
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : 'Failed to import entry bundle.')
     } finally {
@@ -1002,8 +1021,7 @@ function App(): ReactElement {
   async function handleInspectVaultBackup(): Promise<void> {
     setIsPortabilityBusy(true)
     setError('')
-    setActiveOverlay('portability')
-    setActiveNavSection('portability')
+    openDockTab('portability')
 
     try {
       const inspection = await vaultApi.inspectVaultBackup()
@@ -1041,8 +1059,7 @@ function App(): ReactElement {
       setLastPortabilityResult(summary)
       setNotice(summary)
       setVaultBackupInspection(null)
-      setActiveOverlay(null)
-      setActiveNavSection('browse')
+      closeDockTab('portability')
     } catch (restoreError) {
       setError(
         restoreError instanceof Error ? restoreError.message : 'Failed to restore vault backup.'
@@ -1211,13 +1228,6 @@ function App(): ReactElement {
     }))
   }
 
-  function removeInlineTag(tag: string): void {
-    setInlineDraft((current) => ({
-      ...current,
-      tags: current.tags.filter((value) => value !== tag)
-    }))
-  }
-
   function updateImportCandidate(
     tempId: string,
     updater: (candidate: ImportCandidateState) => ImportCandidateState
@@ -1260,8 +1270,7 @@ function App(): ReactElement {
     setIsScanningImport(true)
     setError('')
     setNotice('')
-    setActiveOverlay('import')
-    setActiveNavSection('import')
+    openDockTab('import')
 
     try {
       const selection =
@@ -1284,8 +1293,7 @@ function App(): ReactElement {
     setIsScanningImport(true)
     setError('')
     setNotice('')
-    setActiveOverlay('import')
-    setActiveNavSection('import')
+    openDockTab('import')
 
     try {
       const selection = await vaultApi.pickRootPath()
@@ -1383,8 +1391,7 @@ function App(): ReactElement {
         setNotice(
           `${successes.length} import${successes.length === 1 ? '' : 's'} added to the vault.`
         )
-        setActiveOverlay(null)
-        setActiveNavSection('browse')
+        closeDockTab('import')
       } else {
         const failureMessages = new Map(failures.map((failure) => [failure.tempId, failure.message]))
         setImportCandidates((current) =>
@@ -1514,8 +1521,7 @@ function App(): ReactElement {
       setNotice(
         `Bulk repair updated ${result.updatedEntries} entr${result.updatedEntries === 1 ? 'y' : 'ies'} and ${result.updatedPreviews} preview path${result.updatedPreviews === 1 ? '' : 's'}.`
       )
-      setActiveOverlay(null)
-      setActiveNavSection('browse')
+      closeDockTab('bulkRepair')
     } catch (repairError) {
       setError(repairError instanceof Error ? repairError.message : 'Failed to run bulk repair.')
     } finally {
@@ -1551,6 +1557,133 @@ function App(): ReactElement {
     ))
   }
 
+  function renderImportDockContent(): ReactElement {
+    return (
+      <div>
+        <p className="detail-notes" style={{ marginBottom: 8 }}>
+          Scan existing folders or files, review detected metadata and preview ordering, then save
+          only the entries you want.
+        </p>
+        <div className="action-grid" style={{ marginBottom: 8 }}>
+          <button
+            className="ghost-button"
+            disabled={isScanningImport}
+            type="button"
+            onClick={() => void startSingleImport('folder')}
+          >
+            Import folder
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isScanningImport}
+            type="button"
+            onClick={() => void startSingleImport('file')}
+          >
+            Import file
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isScanningImport}
+            type="button"
+            onClick={() => void startBatchImport()}
+          >
+            Batch import folder
+          </button>
+        </div>
+        {importCandidates.length > 0 ? (
+          <p className="detail-notes">
+            {acceptedImportCount} of {importCandidates.length} candidate
+            {importCandidates.length === 1 ? '' : 's'} set to keep.
+          </p>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderBulkRepairDockContent(): ReactElement {
+    return (
+      <div>
+        <p className="detail-notes" style={{ marginBottom: 8 }}>
+          Replace an old root prefix with a new one across matching entries and preview paths.
+        </p>
+        <form className="entry-form compact-form" onSubmit={(event) => void handleBulkRepair(event)}>
+          <label className="field">
+            <span>Old prefix</span>
+            <input
+              value={bulkRepairDraft.oldPrefix}
+              onChange={(event) =>
+                setBulkRepairDraft((current) => ({ ...current, oldPrefix: event.target.value }))
+              }
+            />
+          </label>
+          <label className="field">
+            <span>New prefix</span>
+            <input
+              value={bulkRepairDraft.newPrefix}
+              onChange={(event) =>
+                setBulkRepairDraft((current) => ({ ...current, newPrefix: event.target.value }))
+              }
+            />
+          </label>
+          <button className="ghost-button" disabled={isBulkRepairing} type="submit">
+            {isBulkRepairing ? 'Repairing...' : 'Run bulk repair'}
+          </button>
+        </form>
+      </div>
+    )
+  }
+
+  function renderPortabilityDockContent(): ReactElement {
+    return (
+      <div>
+        <p className="detail-notes" style={{ marginBottom: 8 }}>
+          Create portable entry bundles, full vault backups, and restore packages on another
+          machine without leaving the app.
+        </p>
+        <div className="action-grid" style={{ marginBottom: 8 }}>
+          <button
+            className="ghost-button"
+            disabled={isPortabilityBusy}
+            type="button"
+            onClick={() => void handleInspectEntryBundle()}
+          >
+            Import entry bundle
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isPortabilityBusy}
+            type="button"
+            onClick={() => void handleExportVaultBackup()}
+          >
+            Create full backup
+          </button>
+          <button
+            className="ghost-button"
+            disabled={isPortabilityBusy}
+            type="button"
+            onClick={() => void handleInspectVaultBackup()}
+          >
+            Restore backup
+          </button>
+        </div>
+        {lastPortabilityResult ? (
+          <p className="detail-notes">{lastPortabilityResult}</p>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderDockTabContent(tabId: DockTabId): ReactElement {
+    switch (tabId) {
+      case 'import':
+        return renderImportDockContent()
+      case 'bulkRepair':
+        return renderBulkRepairDockContent()
+      case 'portability':
+        return renderPortabilityDockContent()
+    }
+  }
+
   function renderEntryCards(items: VaultEntry[], label: string): ReactElement | null {
     if (items.length === 0) {
       return null
@@ -1573,7 +1706,7 @@ function App(): ReactElement {
             >
               <div className="entry-card-shell" onClick={() => setSelectedId(entry.id)}>
                 {entry.previewImagePath && !entry.previewImages[0]?.isMissing ? (
-                  <img alt={`${entry.title} preview`} src={getPreviewSrc(entry.previewImagePath)} />
+                  <PreviewMedia alt={`${entry.title} preview`} src={entry.previewImagePath} />
                 ) : (
                   <div className="preview-placeholder">{entry.type}</div>
                 )}
@@ -1629,145 +1762,100 @@ function App(): ReactElement {
     )
   }
 
-  const sectionCopy: Record<NavSection, { eyebrow: string; title: string; subtitle: string }> = {
-    browse: {
-      eyebrow: 'Vault',
-      title: 'A calmer way to revisit your code archive.',
-      subtitle: 'Search, sort, and scan the pieces you keep returning to.'
-    },
-    import: {
-      eyebrow: 'Import',
-      title: 'Bring existing projects into the vault with review first.',
-      subtitle: 'Scan folders, refine metadata, and save only what earns a card.'
-    },
-    repair: {
-      eyebrow: 'Repair',
-      title: 'Relink moved paths and clean up drift across your archive.',
-      subtitle: 'Repair broken references without losing the surrounding metadata.'
-    },
-    portability: {
-      eyebrow: 'Portability',
-      title: 'Back up the vault and move entries between machines.',
-      subtitle: 'Keep the archive durable with entry bundles and full-vault packages.'
-    }
+  const dockTabLabels: Record<DockTabId, string> = {
+    import: 'Import Projects',
+    bulkRepair: 'Bulk Repair',
+    portability: 'Portability'
   }
 
+  const dockHelpMap: Record<DockTabId, string> = {
+    import: 'importing',
+    bulkRepair: 'repair',
+    portability: 'backup-restore'
+  }
+
+  const accordionHelpMap: Record<string, string> = {
+    'quick-actions': 'run-command',
+    'file-preview': 'file-preview',
+    'gallery': 'previews',
+    'related': 'relationships',
+    'duplicates': 'repair',
+    'template-dup': 'templates'
+  }
+
+  function openHelpTo(sectionId: string): void {
+    setShowHelpGuide(sectionId)
+  }
+
+  const activeTopbarCopy = useMemo(() => {
+    if (activeDockTab && !isDockCollapsed) {
+      return { eyebrow: 'Workspace', title: dockTabLabels[activeDockTab] }
+    }
+    return { eyebrow: 'Vault', title: 'Browse All' }
+  }, [activeDockTab, isDockCollapsed])
+
   return (
-    <div className="app-shell">
+    <div ref={appShellRef} className="app-shell" style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}>
       <aside className="sidebar">
         <div className="brand-block">
           <p className="eyebrow">Local-first desktop vault</p>
           <h1>Code Vault</h1>
-          <p className="lede">
-            A visual archive for snippets, experiments, mini-apps, and reusable code artifacts.
-          </p>
+          <p className="lede">Your curated code archive.</p>
         </div>
 
         <section className="panel nav-panel">
-          <p className="panel-label">Navigate</p>
+          <p className="panel-label">Workspace Tools</p>
           <div className="nav-list">
             <button
-              className={`nav-button ${activeOverlay === null ? 'active' : ''}`}
+              className={`nav-button ${activeDockTab === 'import' && !isDockCollapsed ? 'active' : ''}`}
               type="button"
-              onClick={() => {
-                setActiveNavSection('browse')
-                setActiveOverlay(null)
-              }}
+              onClick={() => openDockTab('import')}
             >
-              <span>Browse vault</span>
-              <small>{entries.length} visible</small>
-            </button>
-            <button
-              className={`nav-button ${activeOverlay === 'import' ? 'active' : ''}`}
-              type="button"
-              onClick={() => openOverlay('import')}
-            >
+              <span className="material-symbols-outlined nav-icon">file_upload</span>
               <span>Import</span>
-              <small>{acceptedImportCount} ready</small>
             </button>
             <button
-              className={`nav-button ${activeOverlay === 'repair' ? 'active' : ''}`}
+              className={`nav-button ${activeDockTab === 'bulkRepair' && !isDockCollapsed ? 'active' : ''}`}
               type="button"
-              onClick={() => openOverlay('repair')}
+              onClick={() => openDockTab('bulkRepair')}
             >
-              <span>Bulk repair</span>
-              <small>Path maintenance</small>
+              <span className="material-symbols-outlined nav-icon">build</span>
+              <span>Bulk Repair</span>
             </button>
             <button
-              className={`nav-button ${activeOverlay === 'portability' ? 'active' : ''}`}
+              className={`nav-button ${activeDockTab === 'portability' && !isDockCollapsed ? 'active' : ''}`}
               type="button"
-              onClick={() => openOverlay('portability')}
+              onClick={() => openDockTab('portability')}
             >
+              <span className="material-symbols-outlined nav-icon">move_down</span>
               <span>Portability</span>
-              <small>Export and restore</small>
             </button>
           </div>
-        </section>
-
-        <section className={`panel workflow-panel ${activeOverlay === 'import' ? 'active' : ''}`}>
-          <div className="panel-heading">
-            <div>
-              <p className="panel-label">Import</p>
-              <h2>Review before saving</h2>
-            </div>
-            <div className="inline-actions">
-              {importCandidates.length > 0 ? (
-                <button className="ghost-button" type="button" onClick={() => setImportCandidates([])}>
-                  Clear review
-                </button>
-              ) : null}
-              <button className="ghost-button" type="button" onClick={closeOverlay}>
-                Close
-              </button>
-            </div>
-          </div>
-          <p className="detail-notes">
-            Scan existing folders or files, review detected metadata and preview ordering, then save
-            only the entries you want.
-          </p>
-          <div className="action-grid">
-            <button
-              className="ghost-button"
-              disabled={isScanningImport}
-              type="button"
-              onClick={() => void startSingleImport('folder')}
-            >
-              Import folder
-            </button>
-            <button
-              className="ghost-button"
-              disabled={isScanningImport}
-              type="button"
-              onClick={() => void startSingleImport('file')}
-            >
-              Import file
-            </button>
-            <button
-              className="ghost-button"
-              disabled={isScanningImport}
-              type="button"
-              onClick={() => void startBatchImport()}
-            >
-              Batch import folder
-            </button>
-          </div>
-          {importCandidates.length > 0 ? (
-            <p className="import-summary">
-              {acceptedImportCount} of {importCandidates.length} candidate
-              {importCandidates.length === 1 ? '' : 's'} set to keep.
-            </p>
-          ) : null}
         </section>
 
         <section className="panel browse-panel">
           <div className="panel-heading">
             <div>
-              <p className="panel-label">Quick filters</p>
+              <p className="panel-label">Filters</p>
               <h2>Browse vault</h2>
             </div>
-            <button className="ghost-button" type="button" onClick={() => void refreshEntries(filters)}>
-              Refresh
-            </button>
+            <div className="inline-actions">
+              <button
+                className="card-icon-btn"
+                type="button"
+                title="Refresh"
+                onClick={() => void refreshEntries(filters)}
+              >
+                <span className="material-symbols-outlined">refresh</span>
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setFilters(defaultFilters)}
+              >
+                Reset
+              </button>
+            </div>
           </div>
 
           <label className="field">
@@ -1779,8 +1867,7 @@ function App(): ReactElement {
             />
           </label>
 
-          <div className="filter-row">
-            <label className="field">
+          <label className="field">
               <span>Type</span>
               <select
                 value={filters.type}
@@ -1819,7 +1906,6 @@ function App(): ReactElement {
                 ))}
               </select>
             </label>
-          </div>
 
           <label className="field">
             <span>Sort</span>
@@ -1849,7 +1935,7 @@ function App(): ReactElement {
                   setFilters((current) => ({ ...current, includeArchived: event.target.checked }))
                 }
               />
-              <span>Include archived</span>
+              <span>Archived{archivedCount > 0 ? ` (${archivedCount})` : ''}</span>
             </label>
 
             <label className="checkbox-field">
@@ -1860,7 +1946,7 @@ function App(): ReactElement {
                   setFilters((current) => ({ ...current, onlyFavorites: event.target.checked }))
                 }
               />
-              <span>Favorites only</span>
+              <span>Favorites</span>
             </label>
 
             <label className="checkbox-field">
@@ -1871,7 +1957,7 @@ function App(): ReactElement {
                   setFilters((current) => ({ ...current, onlyPinned: event.target.checked }))
                 }
               />
-              <span>Pinned only</span>
+              <span>Pinned</span>
             </label>
 
             <label className="checkbox-field">
@@ -1882,354 +1968,34 @@ function App(): ReactElement {
                   setFilters((current) => ({ ...current, onlyTemplates: event.target.checked }))
                 }
               />
-              <span>Templates only</span>
+              <span>Templates</span>
             </label>
           </div>
-        </section>
-
-        <section className={`panel workflow-panel ${activeOverlay === 'repair' ? 'active' : ''}`}>
-          <div className="panel-heading">
-            <div>
-              <p className="panel-label">Repair</p>
-              <h2>Bulk repair</h2>
-            </div>
-            <button className="ghost-button" type="button" onClick={closeOverlay}>
-              Close
-            </button>
-          </div>
-          <p className="detail-notes">
-            Replace an old root prefix with a new one across matching entries and preview paths.
-          </p>
-          <form className="entry-form compact-form" onSubmit={(event) => void handleBulkRepair(event)}>
-            <label className="field">
-              <span>Old prefix</span>
-              <input
-                value={bulkRepairDraft.oldPrefix}
-                onChange={(event) =>
-                  setBulkRepairDraft((current) => ({ ...current, oldPrefix: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>New prefix</span>
-              <input
-                value={bulkRepairDraft.newPrefix}
-                onChange={(event) =>
-                  setBulkRepairDraft((current) => ({ ...current, newPrefix: event.target.value }))
-                }
-              />
-            </label>
-
-            <button className="ghost-button" disabled={isBulkRepairing} type="submit">
-              {isBulkRepairing ? 'Repairing...' : 'Run bulk repair'}
-            </button>
-          </form>
-        </section>
-
-        <section className={`panel workflow-panel ${activeOverlay === 'portability' ? 'active' : ''}`}>
-          <div className="panel-heading">
-            <div>
-              <p className="panel-label">Portability</p>
-              <h2>Export and restore</h2>
-            </div>
-            <button className="ghost-button" type="button" onClick={closeOverlay}>
-              Close
-            </button>
-          </div>
-          <p className="detail-notes">
-            Create portable entry bundles, full vault backups, and restore packages on another
-            machine without leaving the app.
-          </p>
-          <div className="action-grid">
-            <button
-              className="ghost-button"
-              disabled={isPortabilityBusy}
-              type="button"
-              onClick={() => void handleInspectEntryBundle()}
-            >
-              Import entry bundle
-            </button>
-            <button
-              className="ghost-button"
-              disabled={isPortabilityBusy}
-              type="button"
-              onClick={() => void handleExportVaultBackup()}
-            >
-              Create full backup
-            </button>
-            <button
-              className="ghost-button"
-              disabled={isPortabilityBusy}
-              type="button"
-              onClick={() => void handleInspectVaultBackup()}
-            >
-              Restore backup
-            </button>
-          </div>
-          {lastPortabilityResult ? (
-            <p className="detail-notes portability-summary">{lastPortabilityResult}</p>
-          ) : null}
-        </section>
-
-        <section className={`panel workflow-panel entry-workflow-panel ${activeOverlay === 'entry' ? 'active' : ''}`}>
-          <div className="panel-heading">
-            <div>
-              <p className="panel-label">{formMode === 'create' ? 'New entry' : 'Edit entry'}</p>
-              <h2>{formMode === 'create' ? 'Compose a new card' : 'Refine this entry'}</h2>
-            </div>
-            <div className="inline-actions">
-              <button className="ghost-button" type="button" onClick={() => void handleRefreshMetadata()}>
-                {isDetectingMetadata ? 'Detecting...' : 'Detect metadata'}
-              </button>
-              {formMode === 'edit' ? (
-                <button className="ghost-button" type="button" onClick={resetCreateForm}>
-                  New entry
-                </button>
-              ) : null}
-              <button className="ghost-button" type="button" onClick={closeOverlay}>
-                Close
-              </button>
-            </div>
-          </div>
-
-          <form className="entry-form" onSubmit={(event) => void handleSubmit(event)}>
-            <label className="field">
-              <span>Title</span>
-              <input
-                required
-                value={draft.title}
-                onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-              />
-            </label>
-
-            <label className="field">
-              <span>Description</span>
-              <textarea
-                rows={3}
-                value={draft.description}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, description: event.target.value }))
-                }
-              />
-            </label>
-
-            <div className="filter-row">
-              <label className="field">
-                <span>Type</span>
-                <select
-                  value={draft.type}
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, type: event.target.value as EntryDraft['type'] }))
-                  }
-                >
-                  {entryTypes.map((type) => (
-                    <option key={type} value={type}>
-                      {type}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="field">
-                <span>Status</span>
-                <select
-                  value={draft.status}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      status: event.target.value as EntryDraft['status']
-                    }))
-                  }
-                >
-                  {entryStatuses.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div className="toggle-grid">
-              <label className="checkbox-field">
-                <input
-                  checked={draft.isFavorite}
-                  type="checkbox"
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, isFavorite: event.target.checked }))
-                  }
-                />
-                <span>Favorite</span>
-              </label>
-
-              <label className="checkbox-field">
-                <input
-                  checked={draft.isPinned}
-                  type="checkbox"
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, isPinned: event.target.checked }))
-                  }
-                />
-                <span>Pinned</span>
-              </label>
-
-              <label className="checkbox-field">
-                <input
-                  checked={draft.isTemplate}
-                  type="checkbox"
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, isTemplate: event.target.checked }))
-                  }
-                />
-                <span>Template</span>
-              </label>
-            </div>
-
-            <label className="field">
-              <span>Tags</span>
-              <input
-                placeholder="react, sqlite, animation"
-                value={draft.tags.join(', ')}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, tags: parseTags(event.target.value) }))
-                }
-              />
-            </label>
-
-            {suggestedTags.length > 0 ? (
-              <div className="suggestion-row">
-                {suggestedTags.map((tag) => (
-                  <button
-                    key={tag}
-                    className="chip-action"
-                    type="button"
-                    onClick={() => addSuggestedTag(tag)}
-                  >
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-
-            <label className="field">
-              <span>Stack / language</span>
-              <input
-                value={draft.stack}
-                onChange={(event) => setDraft((current) => ({ ...current, stack: event.target.value }))}
-                placeholder="React, TypeScript, GLSL"
-              />
-            </label>
-
-            <label className="field">
-              <span>Root path</span>
-              <div className="path-input">
-                <input
-                  required
-                  value={draft.rootPath}
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, rootPath: event.target.value }))
-                  }
-                />
-                <button className="ghost-button" type="button" onClick={() => void pickRootPath()}>
-                  Browse
-                </button>
-              </div>
-            </label>
-
-            <label className="field">
-              <span>Entry file path</span>
-              <div className="path-input">
-                <input
-                  value={draft.entryFilePath}
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, entryFilePath: event.target.value }))
-                  }
-                />
-                <button className="ghost-button" type="button" onClick={() => void pickEntryFile()}>
-                  Browse
-                </button>
-              </div>
-            </label>
-
-            <label className="field">
-              <span>Run command</span>
-              <input
-                value={draft.runCommand}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, runCommand: event.target.value }))
-                }
-                placeholder="npm run dev"
-              />
-            </label>
-
-            <div className="detail-block quick-preview-panel">
-              <div className="panel-heading">
-                <h3>Preview gallery</h3>
-                <button className="ghost-button" type="button" onClick={() => void attachPreviewToDraft()}>
-                  Attach preview
-                </button>
-              </div>
-              {renderPreviewEditor(draft.previewImages, moveDraftPreview, removeDraftPreview)}
-            </div>
-
-            <label className="field">
-              <span>Good for</span>
-              <textarea
-                rows={2}
-                value={draft.goodFor}
-                onChange={(event) => setDraft((current) => ({ ...current, goodFor: event.target.value }))}
-              />
-            </label>
-
-            <label className="field">
-              <span>Setup notes</span>
-              <textarea
-                rows={2}
-                value={draft.setupNotes}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, setupNotes: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Dependency notes</span>
-              <textarea
-                rows={2}
-                value={draft.dependencyNotes}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, dependencyNotes: event.target.value }))
-                }
-              />
-            </label>
-
-            <label className="field">
-              <span>Notes</span>
-              <textarea
-                rows={4}
-                value={draft.notes}
-                onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
-              />
-            </label>
-
-            <button className="primary-button" disabled={isSaving} type="submit">
-              {isSaving ? 'Saving...' : formMode === 'create' ? 'Save entry' : 'Update entry'}
-            </button>
-          </form>
         </section>
       </aside>
 
-      <main className="content">
+      <div
+        className="resize-handle resize-handle-left"
+        onMouseDown={(e) => startResize('left', e.clientX, sidebarWidth)}
+      />
+
+      <main ref={contentRef} className="content" style={{ gridTemplateColumns: `1fr 6px ${detailWidth}px` }}>
         <header className="topbar">
           <div className="topbar-copy">
-            <p className="eyebrow">{sectionCopy[activeNavSection].eyebrow}</p>
-            <h2>{sectionCopy[activeNavSection].title}</h2>
-            <p className="topbar-subtitle">{sectionCopy[activeNavSection].subtitle}</p>
+            <p className="eyebrow">{activeTopbarCopy.eyebrow}</p>
+            <h2>{activeTopbarCopy.title}</h2>
           </div>
           <div className="topbar-actions">
+            <button
+              className="theme-toggle"
+              type="button"
+              onClick={() => setShowHelpGuide('layout')}
+            >
+              <span className="material-symbols-outlined" style={{ fontSize: 15, verticalAlign: 'middle', marginRight: 4 }}>help</span>
+              <span>Open Guide</span>
+            </button>
             <button className="theme-toggle" type="button" onClick={toggleThemeMode}>
-              <span>{themeMode === 'light' ? 'Dark' : 'Light'} mode</span>
+              <span>{themeMode === 'light' ? '\u263E Dark' : '\u2600 Light'}</span>
             </button>
             <button className="primary-button topbar-button" type="button" onClick={openCreateOverlay}>
               New entry
@@ -2243,32 +2009,24 @@ function App(): ReactElement {
             <h2>{entries.length} visible item{entries.length === 1 ? '' : 's'}</h2>
           </div>
           <div className="status-area">
-            <div className="view-switch">
-              <button
-                className={`ghost-button ${layoutMode === 'grid' ? 'active-toggle' : ''}`}
-                type="button"
-                onClick={() => setLayoutMode('grid')}
-              >
-                Grid
-              </button>
-              <button
-                className={`ghost-button ${layoutMode === 'list' ? 'active-toggle' : ''}`}
-                type="button"
-                onClick={() => setLayoutMode('list')}
-              >
-                List
-              </button>
-            </div>
-            {error ? <p className="status-message error">{error}</p> : null}
-            {!error && notice ? <p className="status-message">{notice}</p> : null}
+            <button
+              className={`card-icon-btn ${compactGrid ? 'active' : ''}`}
+              type="button"
+              title={compactGrid ? 'Show fewer, larger cards' : 'Show more, smaller cards'}
+              onClick={() => setCompactGrid((c) => !c)}
+            >
+              <span className="material-symbols-outlined">{compactGrid ? 'grid_view' : 'apps'}</span>
+            </button>
           </div>
         </section>
 
         {entryBundleInspection ? (
+          <>
+          <div className="workflow-review-backdrop" onClick={() => setEntryBundleInspection(null)} />
           <section className="import-review-panel portability-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Phase 5 portability review</p>
+                <p className="eyebrow">Portability review</p>
                 <h2>Entry bundle</h2>
               </div>
               <div className="inline-actions">
@@ -2281,11 +2039,12 @@ function App(): ReactElement {
                   {isPortabilityBusy ? 'Importing...' : 'Import bundle'}
                 </button>
                 <button
-                  className="ghost-button"
+                  className="card-icon-btn"
                   type="button"
+                  title="Dismiss"
                   onClick={() => setEntryBundleInspection(null)}
                 >
-                  Dismiss
+                  <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
             </div>
@@ -2350,13 +2109,16 @@ function App(): ReactElement {
               )}
             </div>
           </section>
+          </>
         ) : null}
 
         {vaultBackupInspection ? (
+          <>
+          <div className="workflow-review-backdrop" onClick={() => setVaultBackupInspection(null)} />
           <section className="import-review-panel portability-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Phase 5 portability review</p>
+                <p className="eyebrow">Portability review</p>
                 <h2>Vault backup</h2>
               </div>
               <div className="inline-actions">
@@ -2369,11 +2131,12 @@ function App(): ReactElement {
                   {isPortabilityBusy ? 'Restoring...' : 'Restore backup'}
                 </button>
                 <button
-                  className="ghost-button"
+                  className="card-icon-btn"
                   type="button"
+                  title="Dismiss"
                   onClick={() => setVaultBackupInspection(null)}
                 >
-                  Dismiss
+                  <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
             </div>
@@ -2438,13 +2201,16 @@ function App(): ReactElement {
               )}
             </div>
           </section>
+          </>
         ) : null}
 
         {importCandidates.length > 0 ? (
+          <>
+          <div className="workflow-review-backdrop" onClick={() => setImportCandidates([])} />
           <section className="import-review-panel workflow-review-panel active">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Phase 4 import review</p>
+                <p className="eyebrow">Import review</p>
                 <h2>{importCandidates.length} candidate{importCandidates.length === 1 ? '' : 's'}</h2>
               </div>
               <div className="inline-actions">
@@ -2458,8 +2224,8 @@ function App(): ReactElement {
                     ? 'Saving...'
                     : `Save ${acceptedImportCount} accepted import${acceptedImportCount === 1 ? '' : 's'}`}
                 </button>
-                <button className="ghost-button" type="button" onClick={() => setImportCandidates([])}>
-                  Dismiss
+                <button className="card-icon-btn" type="button" title="Dismiss" onClick={() => setImportCandidates([])}>
+                  <span className="material-symbols-outlined">close</span>
                 </button>
               </div>
             </div>
@@ -2708,10 +2474,12 @@ function App(): ReactElement {
               ))}
             </div>
           </section>
+          </>
         ) : null}
 
         <section className="workspace">
-          <div className="vault-panel">
+          <section className="vault-workspace">
+          <div className="vault-scroll">
             {isLoading ? <div className="empty-state">Loading your vault...</div> : null}
 
             {!isLoading && entries.length === 0 ? (
@@ -2719,14 +2487,6 @@ function App(): ReactElement {
                 <h3>No entries yet</h3>
                 <p>Add your first item or import an existing project to start building your vault.</p>
               </div>
-            ) : null}
-
-            {!isLoading && recentActivity ? (
-              <>
-                {renderEntryCards(recentActivity.viewed, 'Recently viewed')}
-                {renderEntryCards(recentActivity.created, 'Recently added')}
-                {renderEntryCards(recentActivity.updated, 'Recently updated')}
-              </>
             ) : null}
 
             {!isLoading && pinnedEntries.length > 0 ? (
@@ -2743,7 +2503,7 @@ function App(): ReactElement {
                     >
                       <div className="entry-card-shell" onClick={() => setSelectedId(entry.id)}>
                         {entry.previewImagePath && !entry.previewImages[0]?.isMissing ? (
-                          <img alt={`${entry.title} preview`} src={getPreviewSrc(entry.previewImagePath)} />
+                          <PreviewMedia alt={`${entry.title} preview`} src={entry.previewImagePath} />
                         ) : (
                           <div className="preview-placeholder">{entry.type}</div>
                         )}
@@ -2755,6 +2515,12 @@ function App(): ReactElement {
                             <span className="chip subtle">pinned</span>
                             {entry.isFavorite ? <span className="chip subtle">favorite</span> : null}
                             {entry.isTemplate ? <span className="chip subtle">template</span> : null}
+                            {relationshipCountMap.get(entry.id) ? (
+                              <span className="chip subtle">
+                                <span className="material-symbols-outlined" style={{ fontSize: 12, marginRight: 2 }}>link</span>
+                                {relationshipCountMap.get(entry.id)}
+                              </span>
+                            ) : null}
                           </div>
                         </div>
                       </div>
@@ -2765,15 +2531,15 @@ function App(): ReactElement {
             ) : null}
 
             {!isLoading && entries.length > 0 ? (
-              <div className={`card-grid ${layoutMode === 'list' ? 'list' : ''}`}>
+              <div className={`card-grid ${compactGrid ? 'cols-4' : ''}`}>
                 {entries.map((entry) => (
                   <article
                     key={entry.id}
-                    className={`entry-card ${layoutMode === 'list' ? 'list' : ''} ${selectedId === entry.id ? 'selected' : ''}`}
+                    className={`entry-card ${selectedId === entry.id ? 'selected' : ''}`}
                   >
                     <div className="entry-card-shell" onClick={() => setSelectedId(entry.id)}>
                       {entry.previewImagePath && !entry.previewImages[0]?.isMissing ? (
-                        <img alt={`${entry.title} preview`} src={getPreviewSrc(entry.previewImagePath)} />
+                        <PreviewMedia alt={`${entry.title} preview`} src={entry.previewImagePath} />
                       ) : (
                         <div className="preview-placeholder">{entry.type}</div>
                       )}
@@ -2796,14 +2562,21 @@ function App(): ReactElement {
                               {tag}
                             </span>
                           ))}
+                          {relationshipCountMap.get(entry.id) ? (
+                            <span className="chip subtle">
+                              <span className="material-symbols-outlined" style={{ fontSize: 12, marginRight: 2 }}>link</span>
+                              {relationshipCountMap.get(entry.id)}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
 
                     <div className="card-controls">
                       <button
-                        className="chip-action"
+                        className={`card-icon-btn ${entry.isFavorite ? 'active' : ''}`}
                         type="button"
+                        title={entry.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
                         onClick={() =>
                           void handleToggleFlag(
                             entry,
@@ -2812,11 +2585,12 @@ function App(): ReactElement {
                           )
                         }
                       >
-                        {entry.isFavorite ? 'Unfavorite' : 'Favorite'}
+                        <span className="material-symbols-outlined">star</span>
                       </button>
                       <button
-                        className="chip-action"
+                        className={`card-icon-btn ${entry.isPinned ? 'active' : ''}`}
                         type="button"
+                        title={entry.isPinned ? 'Unpin' : 'Pin'}
                         onClick={() =>
                           void handleToggleFlag(
                             entry,
@@ -2825,7 +2599,7 @@ function App(): ReactElement {
                           )
                         }
                       >
-                        {entry.isPinned ? 'Unpin' : 'Pin'}
+                        <span className="material-symbols-outlined">push_pin</span>
                       </button>
                     </div>
                   </article>
@@ -2834,53 +2608,160 @@ function App(): ReactElement {
             ) : null}
           </div>
 
+          {openDockTabs.length > 0 && !isDockCollapsed ? (
+            <>
+              <div
+                className="dock-resize-handle"
+                onMouseDown={(e) => startDockResize(e.clientY, dockHeight)}
+              />
+              <div className="dock-panel" style={{ height: dockHeight }}>
+                <div className="dock-header">
+                  <div className="dock-tabs">
+                    {openDockTabs.map((tabId) => (
+                      <div key={tabId} className={`dock-tab ${activeDockTab === tabId ? 'active' : ''}`}>
+                        <span
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => focusDockTab(tabId)}
+                        >
+                          {dockTabLabels[tabId]}
+                        </span>
+                        <button
+                          className="dock-tab-close"
+                          type="button"
+                          title="Close tab"
+                          onClick={() => closeDockTab(tabId)}
+                        >
+                          <span className="material-symbols-outlined">close</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="dock-header-actions">
+                    {activeDockTab ? (
+                      <button
+                        className="card-icon-btn help-context-btn"
+                        type="button"
+                        title="Help"
+                        onClick={() => openHelpTo(dockHelpMap[activeDockTab])}
+                      >
+                        <span className="material-symbols-outlined">help</span>
+                      </button>
+                    ) : null}
+                    <button
+                      className="card-icon-btn"
+                      type="button"
+                      title={dockLayoutMode === 'focused' ? 'Split view' : 'Focused view'}
+                      onClick={() => setDockLayoutMode((m) => (m === 'focused' ? 'split' : 'focused'))}
+                    >
+                      <span className="material-symbols-outlined">
+                        {dockLayoutMode === 'focused' ? 'vertical_split' : 'crop_square'}
+                      </span>
+                    </button>
+                    <button
+                      className="card-icon-btn"
+                      type="button"
+                      title="Collapse dock"
+                      onClick={toggleDockCollapse}
+                    >
+                      <span className="material-symbols-outlined">expand_more</span>
+                    </button>
+                  </div>
+                </div>
+                {dockLayoutMode === 'focused' && activeDockTab ? (
+                  <div className="dock-content">
+                    {renderDockTabContent(activeDockTab)}
+                  </div>
+                ) : (
+                  <div className="dock-split">
+                    {openDockTabs.map((tabId) => (
+                      <div key={tabId} className="dock-content">
+                        {renderDockTabContent(tabId)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : null}
+          </section>
+
+          <div
+            className="resize-handle resize-handle-right"
+            onMouseDown={(e) => startResize('right', e.clientX, detailWidth)}
+          />
+
           <section className="detail-panel">
             {selectedEntry ? (
               <>
-                <div className="detail-preview">
-                  {selectedPreview && !selectedPreview.isMissing ? (
-                    <img
-                      alt={`${selectedEntry.title} preview`}
-                      src={getPreviewSrc(selectedPreview.path)}
-                    />
-                  ) : (
-                    <div className="preview-placeholder large">
-                      {selectedPreview?.isMissing ? 'Missing preview' : selectedEntry.type}
-                    </div>
-                  )}
-                </div>
-
-                {selectedEntry.previewImages.length > 0 ? (
-                  <div className="thumbnail-strip">
-                    {selectedEntry.previewImages.map((image) => (
+                {/* 1. Gallery with hover controls (scrolls away) */}
+                <div className="detail-preview detail-gallery">
+                  <div key={selectedPreviewId} className={`detail-preview-slide slide-${carouselDirectionRef.current}`}>
+                    {selectedPreview && !selectedPreview.isMissing ? (
+                      <PreviewMedia
+                        alt={`${selectedEntry.title} preview`}
+                        src={selectedPreview.path}
+                      />
+                    ) : (
+                      <div className="preview-placeholder large">
+                        {selectedPreview?.isMissing ? 'Missing preview' : selectedEntry.type}
+                      </div>
+                    )}
+                  </div>
+                  <div className="gallery-hover-controls">
+                    <button type="button" title="Previous" onClick={() => navigatePreview('prev')}>
+                      <span className="material-symbols-outlined">chevron_left</span>
+                    </button>
+                    <button type="button" title="Next" onClick={() => navigatePreview('next')}>
+                      <span className="material-symbols-outlined">chevron_right</span>
+                    </button>
+                    {selectedEntry.previewImages.length >= 2 ? (
                       <button
-                        key={image.id}
-                        className={`thumbnail-button ${selectedPreview?.id === image.id ? 'selected' : ''}`}
                         type="button"
-                        onClick={() => setSelectedPreviewId(image.id)}
+                        title={isCarouselLocked ? 'Unlock carousel' : 'Lock on this image'}
+                        onClick={() => setIsCarouselLocked((l) => !l)}
                       >
-                        {image.isMissing ? (
-                          <span>Missing</span>
-                        ) : (
-                          <img alt={`${selectedEntry.title} thumbnail`} src={getPreviewSrc(image.path)} />
-                        )}
+                        <span className="material-symbols-outlined">{isCarouselLocked ? 'lock' : 'lock_open'}</span>
                       </button>
-                    ))}
-                  </div>
-                ) : null}
-
-                <div className="detail-header">
-                  <div>
-                    <p className="eyebrow">Item detail</p>
-                    <h2>{selectedEntry.title}</h2>
-                  </div>
-                  <div className="detail-actions">
-                    <button className="ghost-button" type="button" onClick={startEdit}>
-                      Edit form
+                    ) : null}
+                    <button
+                      type="button"
+                      title="Add preview"
+                      onClick={() => void handleAttachPreviewToEntry()}
+                    >
+                      <span className="material-symbols-outlined">add</span>
                     </button>
                     <button
-                      className="ghost-button"
                       type="button"
+                      title="Remove preview"
+                      disabled={!selectedPreview || isManagingPreviews}
+                      onClick={() =>
+                        selectedPreview
+                          ? void handleRemoveEntryPreview(selectedPreview.id)
+                          : undefined
+                      }
+                    >
+                      <span className="material-symbols-outlined">delete</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="detail-sticky-header">
+                {/* 2. Header with icon buttons */}
+                <div className="detail-header">
+                  <p className="eyebrow">Item detail</p>
+                  <div className="detail-actions">
+                    <button
+                      className="card-icon-btn"
+                      type="button"
+                      title="Edit"
+                      onClick={startEdit}
+                    >
+                      <span className="material-symbols-outlined">edit</span>
+                    </button>
+                    <button
+                      className={`card-icon-btn ${selectedEntry.isFavorite ? 'active' : ''}`}
+                      type="button"
+                      title={selectedEntry.isFavorite ? 'Unfavorite' : 'Favorite'}
                       onClick={() =>
                         void handleToggleFlag(
                           selectedEntry,
@@ -2891,11 +2772,12 @@ function App(): ReactElement {
                         )
                       }
                     >
-                      {selectedEntry.isFavorite ? 'Unfavorite' : 'Favorite'}
+                      <span className="material-symbols-outlined">star</span>
                     </button>
                     <button
-                      className="ghost-button"
+                      className={`card-icon-btn ${selectedEntry.isPinned ? 'active' : ''}`}
                       type="button"
+                      title={selectedEntry.isPinned ? 'Unpin' : 'Pin'}
                       onClick={() =>
                         void handleToggleFlag(
                           selectedEntry,
@@ -2904,100 +2786,50 @@ function App(): ReactElement {
                         )
                       }
                     >
-                      {selectedEntry.isPinned ? 'Unpin' : 'Pin'}
-                    </button>
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      onClick={() =>
-                        void handleToggleFlag(
-                          selectedEntry,
-                          'isTemplate',
-                          selectedEntry.isTemplate
-                            ? 'Template badge removed.'
-                            : 'Marked as template.'
-                        )
-                      }
-                    >
-                      {selectedEntry.isTemplate ? 'Unset template' : 'Mark template'}
-                    </button>
-                    <button className="ghost-button" type="button" onClick={() => void handleArchive()}>
-                      Archive
-                    </button>
-                    <button className="danger-button" type="button" onClick={() => void handleDelete()}>
-                      Delete
+                      <span className="material-symbols-outlined">push_pin</span>
                     </button>
                   </div>
                 </div>
+                <h2>{selectedEntry.title}</h2>
 
-                <p className="detail-description">
-                  {selectedEntry.description || 'No description saved for this entry yet.'}
-                </p>
-
-                <div className="chip-row">
+                {/* 3. Compact metadata line */}
+                <div className="detail-meta-line">
                   <span className="chip">{selectedEntry.type}</span>
                   <span className="chip">{selectedEntry.status}</span>
                   {selectedEntry.stack ? <span className="chip">{selectedEntry.stack}</span> : null}
-                  {selectedEntry.hasBrokenPaths ? <span className="chip warning">broken paths</span> : null}
-                  {selectedEntry.isFavorite ? <span className="chip subtle">favorite</span> : null}
-                  {selectedEntry.isPinned ? <span className="chip subtle">pinned</span> : null}
-                  {selectedEntry.isTemplate ? <span className="chip subtle">template</span> : null}
-                  {selectedEntry.runCommand ? <span className="chip subtle">runnable</span> : null}
-                  {selectedEntry.tags.map((tag) => (
-                    <span key={tag} className="chip subtle">
-                      {tag}
+                  {relationships.length > 0 ? (
+                    <span className="chip subtle">
+                      <span className="material-symbols-outlined" style={{ fontSize: 12, marginRight: 2 }}>link</span>
+                      {relationships.length}
                     </span>
-                  ))}
+                  ) : null}
                 </div>
 
-                <div className="detail-meta">
-                  <div className="detail-block">
-                    <h3>Paths</h3>
-                    <div className="meta-line">
-                      <span>Root</span>
-                      <code className="path-code" title={selectedEntry.rootPath}>
-                        {selectedEntry.rootPath}
-                      </code>
-                    </div>
-                    {selectedEntry.entryFilePath ? (
-                      <div className="meta-line">
-                        <span>Entry file</span>
-                        <code className="path-code" title={selectedEntry.entryFilePath}>
-                          {selectedEntry.entryFilePath}
-                        </code>
-                      </div>
-                    ) : null}
-                    {selectedPreview ? (
-                      <div className="meta-line">
-                        <span>Selected preview</span>
-                        <code className="path-code" title={selectedPreview.path}>
-                          {selectedPreview.path}
-                        </code>
-                      </div>
-                    ) : null}
-                    {selectedEntry.runCommand ? (
-                      <div className="meta-line">
-                        <span>Run command</span>
-                        <code className="path-code" title={selectedEntry.runCommand}>
-                          {selectedEntry.runCommand}
-                        </code>
-                      </div>
-                    ) : null}
-                    <div className="meta-line">
-                      <span>Last viewed</span>
-                      <code className="path-code">{formatDate(selectedEntry.lastViewedAt)}</code>
-                    </div>
-                  </div>
+                {/* 4. Description (clamped) */}
+                <p className="detail-description detail-description-clamp">
+                  {selectedEntry.description || 'No description saved for this entry yet.'}
+                </p>
+                </div>
 
-                  <div className="detail-block">
+                {/* 5. Quick Actions accordion */}
+                <details className="detail-accordion" open={openAccordion === 'quick-actions'} onToggle={(e) => handleAccordionToggle('quick-actions', (e.target as HTMLDetailsElement).open)}>
+                  <summary>
                     <h3>Quick actions</h3>
-                    <div className="action-grid">
+                    {openAccordion === 'quick-actions' ? (
+                      <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['quick-actions']) }}>
+                        <span className="material-symbols-outlined">help</span>
+                      </button>
+                    ) : null}
+                    <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                  </summary>
+                  <div className="detail-accordion-body">
+                    <div className="detail-quick-actions">
                       <button
                         className="ghost-button"
                         type="button"
                         onClick={() => void handleOpenPath(selectedEntry.rootPath, 'Root path')}
                       >
-                        Open root folder
+                        Open root
                       </button>
                       <button
                         className="ghost-button"
@@ -3005,7 +2837,7 @@ function App(): ReactElement {
                         disabled={!selectedEntry.entryFilePath}
                         onClick={() => void handleOpenPath(selectedEntry.entryFilePath, 'Entry file')}
                       >
-                        Open entry file
+                        Open file
                       </button>
                       <button
                         className="ghost-button"
@@ -3020,8 +2852,10 @@ function App(): ReactElement {
                         type="button"
                         onClick={() => void handleCopy(selectedEntry.rootPath, 'Root path')}
                       >
-                        Copy root path
+                        Copy path
                       </button>
+                    </div>
+                    <div className="detail-quick-actions" style={{ marginTop: 6 }}>
                       <button
                         className="ghost-button"
                         type="button"
@@ -3030,7 +2864,7 @@ function App(): ReactElement {
                           void handleCopy(selectedEntry.entryFilePath, 'Entry file path')
                         }
                       >
-                        Copy entry file path
+                        Copy entry file
                       </button>
                       <button
                         className="ghost-button"
@@ -3042,366 +2876,317 @@ function App(): ReactElement {
                             : undefined
                         }
                       >
-                        Open preview image
+                        Open preview
                       </button>
                     </div>
                   </div>
-                </div>
+                </details>
 
-                <div className="detail-block quick-preview-panel">
-                  <div className="panel-heading">
-                    <h3>Portability</h3>
+                {/* 6. File Preview accordion (default closed) */}
+                <details className="detail-accordion" open={openAccordion === 'file-preview'} onToggle={(e) => handleAccordionToggle('file-preview', (e.target as HTMLDetailsElement).open)}>
+                  <summary>
+                    <h3>File preview</h3>
+                    <button
+                      className="card-icon-btn"
+                      type="button"
+                      title="View full"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setShowFilePreviewModal(true)
+                      }}
+                    >
+                      <span className="material-symbols-outlined">open_in_full</span>
+                    </button>
+                    {openAccordion === 'file-preview' ? (
+                      <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['file-preview']) }}>
+                        <span className="material-symbols-outlined">help</span>
+                      </button>
+                    ) : null}
+                    <span className="chip subtle">
+                      {detailPreviewInspection?.files.length ?? 0} file
+                      {(detailPreviewInspection?.files.length ?? 0) === 1 ? '' : 's'}
+                    </span>
+                    <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                  </summary>
+                  <div className="detail-accordion-body">
+                    {detailPreviewInspection && detailPreviewInspection.files.length > 0 ? (
+                      <label className="field">
+                        <span>Preview file</span>
+                        <select value={detailPreviewPath} onChange={(event) => void handleDetailPreviewChange(event)}>
+                          {renderPreviewFileOptions(detailPreviewInspection.files)}
+                        </select>
+                      </label>
+                    ) : null}
+                    {renderQuickPreview(detailPreview)}
                   </div>
-                  <div className="action-grid">
-                    <button
-                      className="ghost-button"
-                      disabled={isPortabilityBusy}
-                      type="button"
-                      onClick={() => void handleExportEntryMetadata()}
-                    >
-                      Export metadata JSON
-                    </button>
-                    <button
-                      className="ghost-button"
-                      disabled={isPortabilityBusy}
-                      type="button"
-                      onClick={() => void handleExportEntryBundle()}
-                    >
-                      Export entry bundle
-                    </button>
-                    <button
-                      className="ghost-button"
-                      disabled={isPortabilityBusy}
-                      type="button"
-                      onClick={() => void handleInspectEntryBundle()}
-                    >
-                      Import entry bundle
-                    </button>
-                  </div>
-                </div>
+                </details>
 
-                <div className="detail-block quick-preview-panel">
-                  <div className="panel-heading">
+                {/* 8. Health & Portability button → opens modal */}
+                <button
+                  className="ghost-button"
+                  type="button"
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', justifyContent: 'space-between' }}
+                  onClick={() => setShowHealthModal(true)}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="material-symbols-outlined" style={{ fontSize: 16 }}>monitor_heart</span>
+                    Health &amp; Portability
+                  </span>
+                  <span className="chip subtle">{healthSummary}</span>
+                </button>
+
+                {/* 9. Preview Gallery accordion (default closed) */}
+                <details className="detail-accordion" open={openAccordion === 'gallery'} onToggle={(e) => handleAccordionToggle('gallery', (e.target as HTMLDetailsElement).open)}>
+                  <summary>
                     <h3>Preview gallery</h3>
-                    <div className="inline-actions">
+                    <span className="chip subtle">{selectedEntry.previewImages.length}</span>
+                    {openAccordion === 'gallery' ? (
+                      <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['gallery']) }}>
+                        <span className="material-symbols-outlined">help</span>
+                      </button>
+                    ) : null}
+                    <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                  </summary>
+                  <div className="detail-accordion-body">
+                    {selectedEntry.previewImages.length > 0 ? (
+                      <div className="thumbnail-strip">
+                        {selectedEntry.previewImages.map((image) => (
+                          <button
+                            key={image.id}
+                            className={`thumbnail-button ${selectedPreview?.id === image.id ? 'selected' : ''}`}
+                            type="button"
+                            onClick={() => setSelectedPreviewId(image.id)}
+                          >
+                            {image.isMissing ? (
+                              <span>Missing</span>
+                            ) : (
+                              <img alt={`${selectedEntry.title} thumbnail`} src={getPreviewSrc(image.path)} />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {selectedEntry.previewImages.length >= 2 ? (
+                      <div className="carousel-controls">
+                        <label>
+                          <span className="material-symbols-outlined" style={{ fontSize: 14, verticalAlign: 'middle', marginRight: 2 }}>slideshow</span>
+                          {carouselInterval === null ? 'Off' : `${carouselInterval}s`}
+                        </label>
+                        <input
+                          type="range"
+                          min={0}
+                          max={5}
+                          step={0.5}
+                          value={carouselInterval ?? 0}
+                          onChange={(e) => {
+                            const val = Number(e.target.value)
+                            setCarouselInterval(val === 0 ? null : val)
+                          }}
+                          title={carouselInterval === null ? 'Carousel off — drag to set speed' : `Carousel speed: ${carouselInterval}s per slide`}
+                        />
+                        {selectedEntry.previewImages.length >= 2 ? (
+                          <button
+                            className="card-icon-btn"
+                            type="button"
+                            title={isCarouselLocked ? 'Unlock carousel' : 'Lock on current image'}
+                            onClick={() => setIsCarouselLocked((l) => !l)}
+                          >
+                            <span className="material-symbols-outlined">{isCarouselLocked ? 'lock' : 'lock_open'}</span>
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div className="inline-actions" style={{ marginTop: 6 }}>
                       <button
-                        className="ghost-button"
+                        className="card-icon-btn"
                         disabled={isManagingPreviews}
                         type="button"
+                        title="Add preview"
                         onClick={() => void handleAttachPreviewToEntry()}
                       >
-                        Add preview
+                        <span className="material-symbols-outlined">add</span>
                       </button>
                       <button
-                        className="ghost-button"
+                        className="card-icon-btn"
                         disabled={!selectedPreview || isManagingPreviews}
                         type="button"
+                        title="Move left"
                         onClick={() =>
                           selectedPreview
                             ? void handleMoveEntryPreview(selectedPreview.id, 'left')
                             : undefined
                         }
                       >
-                        Move left
+                        <span className="material-symbols-outlined">chevron_left</span>
                       </button>
                       <button
-                        className="ghost-button"
+                        className="card-icon-btn"
                         disabled={!selectedPreview || isManagingPreviews}
                         type="button"
+                        title="Move right"
                         onClick={() =>
                           selectedPreview
                             ? void handleMoveEntryPreview(selectedPreview.id, 'right')
                             : undefined
                         }
                       >
-                        Move right
+                        <span className="material-symbols-outlined">chevron_right</span>
                       </button>
                       <button
-                        className="ghost-button"
+                        className="card-icon-btn"
                         disabled={!selectedPreview || isManagingPreviews}
                         type="button"
+                        title="Remove"
                         onClick={() =>
                           selectedPreview
                             ? void handleRemoveEntryPreview(selectedPreview.id)
                             : undefined
                         }
                       >
-                        Remove
+                        <span className="material-symbols-outlined">delete</span>
                       </button>
                     </div>
+                    <details className="preview-path-details">
+                      <summary>Show file paths</summary>
+                      {renderPreviewEditor(
+                        selectedEntry.previewImages,
+                        (previewId, direction) => void handleMoveEntryPreview(previewId, direction),
+                        (previewId) => void handleRemoveEntryPreview(previewId)
+                      )}
+                    </details>
                   </div>
-                  {renderPreviewEditor(
-                    selectedEntry.previewImages,
-                    (previewId, direction) => void handleMoveEntryPreview(previewId, direction),
-                    (previewId) => void handleRemoveEntryPreview(previewId)
-                  )}
-                </div>
+                </details>
 
-                <div className="detail-block">
-                  <div className="panel-heading">
-                    <h3>Quick edit</h3>
-                    <button
-                      className="primary-button"
-                      disabled={isSavingInline}
-                      type="button"
-                      onClick={() => void handleSaveInline()}
-                    >
-                      {isSavingInline ? 'Saving...' : 'Save quick changes'}
-                    </button>
-                  </div>
-
-                  <div className="inline-edit-grid">
-                    <label className="field">
-                      <span>Title</span>
-                      <input
-                        value={inlineDraft.title}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({ ...current, title: event.target.value }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Status</span>
-                      <select
-                        value={inlineDraft.status}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({
-                            ...current,
-                            status: event.target.value as InlineDraft['status']
-                          }))
-                        }
-                      >
-                        {entryStatuses.map((status) => (
-                          <option key={status} value={status}>
-                            {status}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span>Description</span>
-                      <textarea
-                        rows={3}
-                        value={inlineDraft.description}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({
-                            ...current,
-                            description: event.target.value
-                          }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Stack / language</span>
-                      <input
-                        value={inlineDraft.stack}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({ ...current, stack: event.target.value }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Tags</span>
-                      <input
-                        value={inlineDraft.tags.join(', ')}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({
-                            ...current,
-                            tags: parseTags(event.target.value)
-                          }))
-                        }
-                      />
-                    </label>
-
-                    {inlineDraft.tags.length > 0 ? (
-                      <div className="chip-row">
-                        {inlineDraft.tags.map((tag) => (
-                          <button
-                            key={tag}
-                            className="chip-action"
-                            type="button"
-                            onClick={() => removeInlineTag(tag)}
-                          >
-                            Remove {tag}
-                          </button>
-                        ))}
-                      </div>
+                {/* 10. Related Items accordion (default closed) */}
+                <details className="detail-accordion" open={openAccordion === 'related'} onToggle={(e) => handleAccordionToggle('related', (e.target as HTMLDetailsElement).open)}>
+                  <summary>
+                    <h3>Related items</h3>
+                    <span className="chip subtle">{relationships.length}</span>
+                    {openAccordion === 'related' ? (
+                      <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['related']) }}>
+                        <span className="material-symbols-outlined">help</span>
+                      </button>
                     ) : null}
-
-                    <label className="field">
-                      <span>Good for</span>
-                      <textarea
-                        rows={2}
-                        value={inlineDraft.goodFor}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({ ...current, goodFor: event.target.value }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Setup notes</span>
-                      <textarea
-                        rows={2}
-                        value={inlineDraft.setupNotes}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({
-                            ...current,
-                            setupNotes: event.target.value
-                          }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Dependency notes</span>
-                      <textarea
-                        rows={2}
-                        value={inlineDraft.dependencyNotes}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({
-                            ...current,
-                            dependencyNotes: event.target.value
-                          }))
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>Markdown notes</span>
-                      <textarea
-                        rows={6}
-                        value={inlineDraft.notes}
-                        onChange={(event) =>
-                          setInlineDraft((current) => ({ ...current, notes: event.target.value }))
-                        }
-                      />
-                    </label>
-                  </div>
-                </div>
-
-                <div className="detail-block">
-                  <h3>Markdown preview</h3>
-                  <div
-                    className="markdown-preview"
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(inlineDraft.notes) }}
-                  />
-                </div>
-
-                <div className="detail-block">
-                  <h3>Duplicate warnings</h3>
-                  {duplicateInspection.matches.length === 0 ? (
-                    <p className="detail-notes">No likely duplicates detected.</p>
-                  ) : (
-                    <div className="relationship-list">
-                      {duplicateInspection.matches.map((match, index) => (
-                        <div key={`${match.entryId}-${match.type}-${index}`} className="relationship-card">
-                          <div>
-                            <p className="eyebrow">{match.type}</p>
-                            <strong>{match.title}</strong>
-                            <p className="detail-notes">{match.detail}</p>
-                          </div>
-                          <button className="ghost-button" type="button" onClick={() => setSelectedId(match.entryId)}>
-                            Open
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="detail-block">
-                  <h3>Path health</h3>
-                  {pathHealth ? (
-                    <>
-                      <div className="meta-line">
-                        <span>Root path</span>
-                        <p className="detail-notes">
-                          {pathHealth.rootPathExists ? 'Healthy' : 'Missing or moved'}
-                        </p>
-                      </div>
-                      <div className="meta-line">
-                        <span>Entry file</span>
-                        <p className="detail-notes">
-                          {pathHealth.entryFileExists ? 'Healthy' : 'Missing or moved'}
-                        </p>
-                      </div>
-                      <div className="meta-line">
-                        <span>Missing previews</span>
-                        <p className="detail-notes">{pathHealth.missingPreviewImages.length}</p>
-                      </div>
-                      <div className="inline-actions">
-                        <button className="ghost-button" type="button" onClick={() => void handleRelinkRoot()}>
-                          Relink root
-                        </button>
-                        <button className="ghost-button" type="button" onClick={() => void handleRelinkEntryFile()}>
-                          Relink entry file
-                        </button>
-                      </div>
-                      {pathHealth.missingPreviewImages.length > 0 ? (
-                        <div className="relationship-list">
-                          {pathHealth.missingPreviewImages.map((image) => (
-                            <div key={image.id} className="relationship-card">
-                              <div>
-                                <strong>Missing preview</strong>
-                                <p className="detail-notes">{image.path}</p>
-                              </div>
-                              <button
-                                className="ghost-button"
-                                type="button"
-                                onClick={() => void handleReplaceMissingPreview(image.id)}
-                              >
-                                Replace
-                              </button>
+                    <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                  </summary>
+                  <div className="detail-accordion-body">
+                    {relationships.length === 0 ? (
+                      <p className="detail-notes">No related items linked yet.</p>
+                    ) : (
+                      <div className="relationship-list">
+                        {relationships.map((relationship) => (
+                          <div key={relationship.id} className="relationship-card">
+                            <div>
+                              <p className="eyebrow">{getRelationshipLabel(relationship.relationshipType)}</p>
+                              <strong>{relationship.target.title}</strong>
+                              <p className="detail-notes">
+                                {relationship.target.type} · {relationship.target.status}
+                              </p>
                             </div>
+                            <button
+                              className="ghost-button"
+                              type="button"
+                              onClick={() => void handleDeleteRelationship(relationship.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <form className="entry-form compact-form" onSubmit={(event) => void handleCreateRelationship(event)}>
+                      <label className="field">
+                        <span>Relationship type</span>
+                        <select
+                          value={relationshipDraft.relationshipType}
+                          onChange={(event) =>
+                            setRelationshipDraft((current) => ({
+                              ...current,
+                              relationshipType: event.target.value as RelationshipType
+                            }))
+                          }
+                        >
+                          {relationshipTypes.map((type) => (
+                            <option key={type} value={type}>
+                              {getRelationshipLabel(type)}
+                            </option>
                           ))}
-                        </div>
-                      ) : null}
-                    </>
-                  ) : (
-                    <p className="detail-notes">No path health information yet.</p>
-                  )}
-                </div>
+                        </select>
+                      </label>
 
-                <div className="detail-block quick-preview-panel">
-                  <div className="panel-heading">
-                    <h3>Quick file preview</h3>
-                    <span className="chip subtle">
-                      {detailPreviewInspection?.files.length ?? 0} file
-                      {(detailPreviewInspection?.files.length ?? 0) === 1 ? '' : 's'}
-                    </span>
-                  </div>
+                      <label className="field">
+                        <span>Target item</span>
+                        <select
+                          value={relationshipDraft.targetEntryId}
+                          onChange={(event) =>
+                            setRelationshipDraft((current) => ({
+                              ...current,
+                              targetEntryId: event.target.value
+                            }))
+                          }
+                        >
+                          <option value="">Choose an item</option>
+                          {relatedTargetOptions.map((entry) => (
+                            <option key={entry.id} value={entry.id}>
+                              {entry.title}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
 
-                  {detailPreviewInspection && detailPreviewInspection.files.length > 0 ? (
-                    <label className="field">
-                      <span>Preview file</span>
-                      <select value={detailPreviewPath} onChange={(event) => void handleDetailPreviewChange(event)}>
-                        {renderPreviewFileOptions(detailPreviewInspection.files)}
-                      </select>
-                    </label>
-                  ) : null}
-
-                  {renderQuickPreview(detailPreview)}
-                </div>
-
-                {selectedEntry.isTemplate ? (
-                  <div className="detail-block">
-                    <div className="panel-heading">
-                      <h3>Template duplication</h3>
-                      <button
-                        className="ghost-button"
-                        type="button"
-                        onClick={() => setShowDuplicateTemplate((current) => !current)}
-                      >
-                        {showDuplicateTemplate ? 'Hide' : 'Duplicate template'}
+                      <button className="ghost-button" disabled={isCreatingRelationship} type="submit">
+                        {isCreatingRelationship ? 'Adding...' : 'Add relationship'}
                       </button>
-                    </div>
+                    </form>
+                  </div>
+                </details>
 
-                    {showDuplicateTemplate ? (
+                {/* 11. Duplicate Warnings accordion (only if matches exist, default closed) */}
+                {duplicateInspection.matches.length > 0 ? (
+                  <details className="detail-accordion" open={openAccordion === 'duplicates'} onToggle={(e) => handleAccordionToggle('duplicates', (e.target as HTMLDetailsElement).open)}>
+                    <summary>
+                      <h3>Duplicate warnings</h3>
+                      <span className="chip warning">{duplicateInspection.matches.length}</span>
+                      {openAccordion === 'duplicates' ? (
+                        <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['duplicates']) }}>
+                          <span className="material-symbols-outlined">help</span>
+                        </button>
+                      ) : null}
+                      <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                    </summary>
+                    <div className="detail-accordion-body">
+                      <div className="relationship-list">
+                        {duplicateInspection.matches.map((match, index) => (
+                          <div key={`${match.entryId}-${match.type}-${index}`} className="relationship-card">
+                            <div>
+                              <p className="eyebrow">{match.type}</p>
+                              <strong>{match.title}</strong>
+                              <p className="detail-notes">{match.detail}</p>
+                            </div>
+                            <button className="ghost-button" type="button" onClick={() => setSelectedId(match.entryId)}>
+                              Open
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </details>
+                ) : null}
+
+                {/* 12. Template Duplication accordion (only if isTemplate, default closed) */}
+                {selectedEntry.isTemplate ? (
+                  <details className="detail-accordion" open={openAccordion === 'template-dup'} onToggle={(e) => handleAccordionToggle('template-dup', (e.target as HTMLDetailsElement).open)}>
+                    <summary>
+                      <h3>Template duplication</h3>
+                      {openAccordion === 'template-dup' ? (
+                        <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={(e) => { e.stopPropagation(); openHelpTo(accordionHelpMap['template-dup']) }}>
+                          <span className="material-symbols-outlined">help</span>
+                        </button>
+                      ) : null}
+                      <span className="material-symbols-outlined accordion-indicator">expand_more</span>
+                    </summary>
+                    <div className="detail-accordion-body">
                       <form
                         className="entry-form compact-form"
                         onSubmit={(event) => void handleDuplicateTemplate(event)}
@@ -3445,83 +3230,54 @@ function App(): ReactElement {
                           {isDuplicating ? 'Duplicating...' : 'Create duplicate'}
                         </button>
                       </form>
-                    ) : null}
-                  </div>
+                    </div>
+                  </details>
                 ) : null}
 
-                <div className="detail-block">
-                  <h3>Related items</h3>
-                  {relationships.length === 0 ? (
-                    <p className="detail-notes">No related items linked yet.</p>
-                  ) : (
-                    <div className="relationship-list">
-                      {relationships.map((relationship) => (
-                        <div key={relationship.id} className="relationship-card">
-                          <div>
-                            <p className="eyebrow">{getRelationshipLabel(relationship.relationshipType)}</p>
-                            <strong>{relationship.target.title}</strong>
-                            <p className="detail-notes">
-                              {relationship.target.type} · {relationship.target.status}
-                            </p>
-                          </div>
-                          <button
-                            className="ghost-button"
-                            type="button"
-                            onClick={() => void handleDeleteRelationship(relationship.id)}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <form className="entry-form compact-form" onSubmit={(event) => void handleCreateRelationship(event)}>
-                    <label className="field">
-                      <span>Relationship type</span>
-                      <select
-                        value={relationshipDraft.relationshipType}
-                        onChange={(event) =>
-                          setRelationshipDraft((current) => ({
-                            ...current,
-                            relationshipType: event.target.value as RelationshipType
-                          }))
-                        }
-                      >
-                        {relationshipTypes.map((type) => (
-                          <option key={type} value={type}>
-                            {getRelationshipLabel(type)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="field">
-                      <span>Target item</span>
-                      <select
-                        value={relationshipDraft.targetEntryId}
-                        onChange={(event) =>
-                          setRelationshipDraft((current) => ({
-                            ...current,
-                            targetEntryId: event.target.value
-                          }))
-                        }
-                      >
-                        <option value="">Choose an item</option>
-                        {relatedTargetOptions.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.title}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <button className="ghost-button" disabled={isCreatingRelationship} type="submit">
-                      {isCreatingRelationship ? 'Adding...' : 'Add relationship'}
+                {/* 13. Danger zone */}
+                <div className="detail-danger-zone">
+                  {selectedEntry.status === 'archived' ? (
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => void handleUnarchive()}
+                    >
+                      Unarchive
                     </button>
-                  </form>
+                  ) : (
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => void handleArchive()}
+                    >
+                      Archive
+                    </button>
+                  )}
+                  <button
+                    className="danger-button"
+                    type="button"
+                    onClick={() => void handleDelete()}
+                  >
+                    Delete
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() =>
+                      void handleToggleFlag(
+                        selectedEntry,
+                        'isTemplate',
+                        selectedEntry.isTemplate
+                          ? 'Template badge removed.'
+                          : 'Marked as template.'
+                      )
+                    }
+                  >
+                    {selectedEntry.isTemplate ? 'Unset template' : 'Mark template'}
+                  </button>
                 </div>
 
+                {/* 14. Footer */}
                 <div className="detail-footer">
                   <span>Created {formatDate(selectedEntry.createdAt)}</span>
                   <span>Updated {formatDate(selectedEntry.updatedAt)}</span>
@@ -3539,6 +3295,398 @@ function App(): ReactElement {
           </section>
         </section>
       </main>
+
+      {showFilePreviewModal && selectedEntry ? (
+        <div className="file-preview-modal-backdrop" onClick={() => setShowFilePreviewModal(false)}>
+          <div className="file-preview-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="detail-header" style={{ marginBottom: 12 }}>
+              <h3>File Preview — {detailPreview?.relativePath ?? 'No file'}</h3>
+              <button className="card-icon-btn" type="button" onClick={() => setShowFilePreviewModal(false)}>
+                <span className="material-symbols-outlined">close</span>
+              </button>
+            </div>
+            {detailPreview?.content ? (
+              detailPreviewPath.endsWith('.md') ? (
+                <div
+                  className="markdown-preview"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(detailPreview.content) }}
+                />
+              ) : (
+                <div className="quick-preview-output">
+                  <pre>{detailPreview.content}</pre>
+                </div>
+              )
+            ) : (
+              <p className="detail-notes">No preview content available.</p>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {showHealthModal && selectedEntry ? (
+        <div className="health-modal-backdrop" onClick={() => setShowHealthModal(false)}>
+          <div className="health-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="detail-header" style={{ marginBottom: 12 }}>
+              <h3>Health &amp; Portability</h3>
+              <div className="inline-actions">
+                <button className="card-icon-btn help-context-btn" type="button" title="Help" onClick={() => openHelpTo('repair')}>
+                  <span className="material-symbols-outlined">help</span>
+                </button>
+                <button className="card-icon-btn" type="button" onClick={() => setShowHealthModal(false)}>
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+            </div>
+            <p className="detail-notes" style={{ marginBottom: 8 }}>
+              Checks if your project files are still where you saved them. Use the export buttons to share or back up this entry.
+            </p>
+            {pathHealth ? (
+              <>
+                <div className="meta-line">
+                  <span>Root path</span>
+                  <p className="detail-notes">
+                    {pathHealth.rootPathExists ? 'Healthy' : 'Missing or moved'}
+                  </p>
+                </div>
+                <div className="meta-line">
+                  <span>Entry file</span>
+                  <p className="detail-notes">
+                    {pathHealth.entryFileExists ? 'Healthy' : 'Missing or moved'}
+                  </p>
+                </div>
+                <div className="meta-line">
+                  <span>Missing previews</span>
+                  <p className="detail-notes">{pathHealth.missingPreviewImages.length}</p>
+                </div>
+                <div className="inline-actions" style={{ marginBottom: 8 }}>
+                  <button className="ghost-button" type="button" onClick={() => void handleRelinkRoot()}>
+                    Relink root
+                  </button>
+                  <button className="ghost-button" type="button" onClick={() => void handleRelinkEntryFile()}>
+                    Relink entry file
+                  </button>
+                </div>
+                {pathHealth.missingPreviewImages.length > 0 ? (
+                  <div className="relationship-list" style={{ marginBottom: 8 }}>
+                    {pathHealth.missingPreviewImages.map((image) => (
+                      <div key={image.id} className="relationship-card">
+                        <div>
+                          <strong>Missing preview</strong>
+                          <p className="detail-notes">{image.path}</p>
+                        </div>
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          onClick={() => void handleReplaceMissingPreview(image.id)}
+                        >
+                          Replace
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p className="detail-notes">No path health information yet.</p>
+            )}
+            <div className="action-grid" style={{ marginTop: 8 }}>
+              <button
+                className="ghost-button"
+                disabled={isPortabilityBusy}
+                type="button"
+                onClick={() => void handleExportEntryMetadata()}
+              >
+                Export metadata JSON
+              </button>
+              <button
+                className="ghost-button"
+                disabled={isPortabilityBusy}
+                type="button"
+                onClick={() => void handleExportEntryBundle()}
+              >
+                Export entry bundle
+              </button>
+              <button
+                className="ghost-button"
+                disabled={isPortabilityBusy}
+                type="button"
+                onClick={() => void handleInspectEntryBundle()}
+              >
+                Import entry bundle
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeOverlay === 'entry' ? (
+        <div className="entry-form-backdrop" onClick={closeOverlay}>
+          <div className="entry-form-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="entry-form-sticky-header">
+            <div className="detail-header">
+              <h3>{formMode === 'create' ? 'New entry' : 'Edit entry'}</h3>
+              <div className="inline-actions">
+                <button className="ghost-button" type="button" onClick={() => void handleRefreshMetadata()}>
+                  {isDetectingMetadata ? 'Detecting...' : 'Detect metadata'}
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={isSaving}
+                  type="button"
+                  onClick={() => formRef.current?.requestSubmit()}
+                >
+                  {isSaving ? 'Saving...' : formMode === 'create' ? 'Save entry' : 'Update entry'}
+                </button>
+                <button className="card-icon-btn" type="button" onClick={closeOverlay}>
+                  <span className="material-symbols-outlined">close</span>
+                </button>
+              </div>
+            </div>
+            </div>
+
+            <div className="vault-reminder" style={{ marginBottom: 12 }}>
+              <span className="material-symbols-outlined vault-reminder-icon">info</span>
+              <p>
+                Code Vault saves a <strong>link</strong> to your project folder — it does not copy or move your files.
+                Your project stays exactly where it is. If you set a <strong>Run command</strong>, you can launch it
+                straight from the vault.
+              </p>
+            </div>
+
+            <form ref={formRef} className="entry-form" onSubmit={(event) => void handleSubmit(event)}>
+              <label className="field">
+                <span>Title</span>
+                <input
+                  required
+                  value={draft.title}
+                  onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+                />
+              </label>
+
+              <label className="field">
+                <span>Description</span>
+                <textarea
+                  rows={3}
+                  value={draft.description}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, description: event.target.value }))
+                  }
+                />
+              </label>
+
+              <div className="filter-row">
+                <label className="field">
+                  <span>Type</span>
+                  <select
+                    value={draft.type}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, type: event.target.value as EntryDraft['type'] }))
+                    }
+                  >
+                    {entryTypes.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Status</span>
+                  <select
+                    value={draft.status}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        status: event.target.value as EntryDraft['status']
+                      }))
+                    }
+                  >
+                    {entryStatuses.map((status) => (
+                      <option key={status} value={status}>
+                        {status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="toggle-grid">
+                <label className="checkbox-field">
+                  <input
+                    checked={draft.isFavorite}
+                    type="checkbox"
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, isFavorite: event.target.checked }))
+                    }
+                  />
+                  <span>Favorite</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    checked={draft.isPinned}
+                    type="checkbox"
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, isPinned: event.target.checked }))
+                    }
+                  />
+                  <span>Pinned</span>
+                </label>
+
+                <label className="checkbox-field">
+                  <input
+                    checked={draft.isTemplate}
+                    type="checkbox"
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, isTemplate: event.target.checked }))
+                    }
+                  />
+                  <span>Template</span>
+                </label>
+              </div>
+
+              <label className="field">
+                <span>Tags</span>
+                <input
+                  placeholder="react, sqlite, animation"
+                  value={draft.tags.join(', ')}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, tags: parseTags(event.target.value) }))
+                  }
+                />
+              </label>
+
+              {suggestedTags.length > 0 ? (
+                <div className="suggestion-row">
+                  {suggestedTags.map((tag) => (
+                    <button
+                      key={tag}
+                      className="chip-action"
+                      type="button"
+                      onClick={() => addSuggestedTag(tag)}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              <label className="field">
+                <span>Stack / language</span>
+                <input
+                  value={draft.stack}
+                  onChange={(event) => setDraft((current) => ({ ...current, stack: event.target.value }))}
+                  placeholder="React, TypeScript, GLSL"
+                />
+              </label>
+
+              <label className="field">
+                <span>Root path</span>
+                <div className="path-input">
+                  <input
+                    required
+                    value={draft.rootPath}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, rootPath: event.target.value }))
+                    }
+                  />
+                  <button className="ghost-button" type="button" onClick={() => void pickRootPath()}>
+                    Browse
+                  </button>
+                </div>
+              </label>
+
+              <label className="field">
+                <span>Entry file path</span>
+                <div className="path-input">
+                  <input
+                    value={draft.entryFilePath}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, entryFilePath: event.target.value }))
+                    }
+                  />
+                  <button className="ghost-button" type="button" onClick={() => void pickEntryFile()}>
+                    Browse
+                  </button>
+                </div>
+              </label>
+
+              <label className="field">
+                <span>Run command</span>
+                <input
+                  value={draft.runCommand}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, runCommand: event.target.value }))
+                  }
+                  placeholder="npm run dev"
+                />
+              </label>
+
+              <div className="detail-block quick-preview-panel">
+                <div className="panel-heading">
+                  <h3>Preview gallery</h3>
+                  <button className="ghost-button" type="button" onClick={() => void attachPreviewToDraft()}>
+                    Attach preview
+                  </button>
+                </div>
+                {renderPreviewEditor(draft.previewImages, moveDraftPreview, removeDraftPreview)}
+              </div>
+
+              <label className="field">
+                <span>Good for</span>
+                <textarea
+                  rows={2}
+                  value={draft.goodFor}
+                  onChange={(event) => setDraft((current) => ({ ...current, goodFor: event.target.value }))}
+                />
+              </label>
+
+              <label className="field">
+                <span>Setup notes</span>
+                <textarea
+                  rows={2}
+                  value={draft.setupNotes}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, setupNotes: event.target.value }))
+                  }
+                />
+              </label>
+
+              <label className="field">
+                <span>Dependency notes</span>
+                <textarea
+                  rows={2}
+                  value={draft.dependencyNotes}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, dependencyNotes: event.target.value }))
+                  }
+                />
+              </label>
+
+              <label className="field">
+                <span>Notes</span>
+                <textarea
+                  rows={4}
+                  value={draft.notes}
+                  onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
+                />
+              </label>
+
+              {formError ? <p className="form-error">{formError}</p> : null}
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {showHelpGuide ? <HelpGuide initialSectionId={showHelpGuide} onClose={() => setShowHelpGuide(null)} /> : null}
+
+      {(error || notice) ? (
+        <div className="toast-container">
+          {error ? <div className="toast error">{error}</div> : null}
+          {!error && notice ? <div className="toast">{notice}</div> : null}
+        </div>
+      ) : null}
     </div>
   )
 }

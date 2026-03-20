@@ -1,6 +1,8 @@
 export const entryTypes = [
   'snippet',
   'mini-app',
+  'mobile-app',
+  'web-app',
   'component',
   'utility',
   'prompt-output',
@@ -8,7 +10,7 @@ export const entryTypes = [
   'experiment'
 ] as const
 
-export const entryStatuses = ['draft', 'usable', 'polished', 'experimental', 'archived'] as const
+export const entryStatuses = ['draft', 'usable', 'polished', 'completed', 'experimental', 'archived'] as const
 
 export const relationshipTypes = [
   'used-in',
@@ -182,7 +184,9 @@ export type ImportSaveResult = {
   entry: VaultEntry | null
 }
 
-export type EntryOption = Pick<VaultEntry, 'id' | 'title' | 'type' | 'status' | 'isTemplate'>
+export type EntryOption = Pick<VaultEntry, 'id' | 'title' | 'type' | 'status' | 'isTemplate'> & {
+  relationshipCount: number
+}
 
 export type EntryRelationship = {
   id: string
