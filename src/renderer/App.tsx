@@ -1186,6 +1186,31 @@ function App(): ReactElement {
     }
   }
 
+  async function handlePasteClipboardImage(): Promise<void> {
+    if (!selectedEntry || isManagingPreviews) {
+      return
+    }
+
+    setIsManagingPreviews(true)
+    try {
+      const updated = await vaultApi.pasteClipboardImage(selectedEntry.id)
+      const lastPreview = updated.previewImages[updated.previewImages.length - 1]
+      if (lastPreview) {
+        setSelectedPreviewId(lastPreview.id)
+      }
+      setSelectedId(updated.id)
+      await Promise.all([refreshEntries(filters), refreshReferenceData()])
+      setNotice('Preview pasted from clipboard.')
+    } catch (pasteError) {
+      const message = pasteError instanceof Error ? pasteError.message : String(pasteError)
+      if (!message.includes('No image found on the clipboard')) {
+        setError(message || 'Failed to paste clipboard image.')
+      }
+    } finally {
+      setIsManagingPreviews(false)
+    }
+  }
+
   async function handleMoveEntryPreview(previewId: string, direction: 'left' | 'right'): Promise<void> {
     if (!selectedEntry) {
       return
@@ -2695,18 +2720,28 @@ function App(): ReactElement {
               <>
                 {/* 1. Gallery with hover controls (scrolls away) */}
                 <div className="detail-preview detail-gallery">
-                  <div key={selectedPreviewId} className={`detail-preview-slide slide-${carouselDirectionRef.current}`}>
-                    {selectedPreview && !selectedPreview.isMissing ? (
-                      <PreviewMedia
-                        alt={`${selectedEntry.title} preview`}
-                        src={selectedPreview.path}
-                      />
-                    ) : (
-                      <div className="preview-placeholder large">
-                        {selectedPreview?.isMissing ? 'Missing preview' : selectedEntry.type}
+                  {selectedEntry.previewImages.length > 0 ? (
+                    selectedEntry.previewImages.map((image) => (
+                      <div
+                        key={image.id}
+                        className={`detail-preview-slide${image.id === selectedPreviewId || (!selectedPreviewId && image.order === 0) ? ` slide-${carouselDirectionRef.current} active-slide` : ''}`}
+                        style={image.id === selectedPreviewId || (!selectedPreviewId && image.order === 0) ? undefined : { position: 'absolute', width: 0, height: 0, overflow: 'hidden', opacity: 0, pointerEvents: 'none' }}
+                      >
+                        {image.isMissing ? (
+                          <div className="preview-placeholder large">Missing preview</div>
+                        ) : (
+                          <PreviewMedia
+                            alt={`${selectedEntry.title} preview`}
+                            src={image.path}
+                          />
+                        )}
                       </div>
-                    )}
-                  </div>
+                    ))
+                  ) : (
+                    <div className="detail-preview-slide active-slide">
+                      <div className="preview-placeholder large">{selectedEntry.type}</div>
+                    </div>
+                  )}
                   <div className="gallery-hover-controls">
                     <button type="button" title="Previous" onClick={() => navigatePreview('prev')}>
                       <span className="material-symbols-outlined">chevron_left</span>
@@ -2729,6 +2764,14 @@ function App(): ReactElement {
                       onClick={() => void handleAttachPreviewToEntry()}
                     >
                       <span className="material-symbols-outlined">add</span>
+                    </button>
+                    <button
+                      type="button"
+                      title="Paste preview from clipboard (Ctrl+V)"
+                      disabled={isManagingPreviews}
+                      onClick={() => void handlePasteClipboardImage()}
+                    >
+                      <span className="material-symbols-outlined">content_paste</span>
                     </button>
                     <button
                       type="button"
@@ -3005,6 +3048,15 @@ function App(): ReactElement {
                         onClick={() => void handleAttachPreviewToEntry()}
                       >
                         <span className="material-symbols-outlined">add</span>
+                      </button>
+                      <button
+                        className="card-icon-btn"
+                        disabled={isManagingPreviews}
+                        type="button"
+                        title="Paste preview from clipboard"
+                        onClick={() => void handlePasteClipboardImage()}
+                      >
+                        <span className="material-symbols-outlined">content_paste</span>
                       </button>
                       <button
                         className="card-icon-btn"

@@ -1789,11 +1789,11 @@ small {
   overflow: hidden;
 }
 
-.detail-preview-slide.slide-next {
+.detail-preview-slide.active-slide.slide-next {
   animation: slideFromRight 0.35s ease both;
 }
 
-.detail-preview-slide.slide-prev {
+.detail-preview-slide.active-slide.slide-prev {
   animation: slideFromLeft 0.35s ease both;
 }
 

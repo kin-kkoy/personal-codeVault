@@ -9,6 +9,7 @@ use std::{
 };
 
 use arboard::Clipboard;
+use image::{ImageBuffer, Rgba};
 use rfd::FileDialog;
 use rusqlite::{params, params_from_iter, Connection};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -1167,10 +1168,31 @@ fn looks_like_preview_image(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    ["preview", "screenshot", "cover", "thumb", "shot"]
-        .iter()
-        .any(|needle| file_name.contains(needle))
-        || path.parent() == path.ancestors().nth(1)
+
+    let exclusions = [
+        "favicon", "icon", "logo", "badge", "avatar", "sprite", "banner",
+        "apple-touch", "og-image", "opengraph", "android-chrome",
+        "mstile", "browserconfig", "site.webmanifest",
+    ];
+    if exclusions.iter().any(|needle| file_name.contains(needle)) {
+        return false;
+    }
+
+    let preview_hints = [
+        "preview", "screenshot", "screen", "capture", "snap", "shot",
+        "thumb", "cover", "demo", "snippet", "recording", "grab", "clip",
+    ];
+    if preview_hints.iter().any(|needle| file_name.contains(needle)) {
+        return true;
+    }
+
+    // Accept images in the project root (not nested in subdirectories)
+    let is_in_root = path.parent() == path.ancestors().nth(1);
+    if is_in_root {
+        return true;
+    }
+
+    false
 }
 
 fn is_previewable_text_file(path: &Path) -> bool {
@@ -3927,6 +3949,70 @@ fn copy_to_clipboard(value: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
+async fn paste_clipboard_image(app: AppHandle, entry_id: String) -> CommandResult<VaultEntry> {
+    let app_clone = app.clone();
+    let saved_path = tauri::async_runtime::spawn_blocking(move || {
+        let mut clipboard = Clipboard::new().map_err(|error| error.to_string())?;
+        let img_data = clipboard
+            .get_image()
+            .map_err(|_| "No image found on the clipboard.".to_string())?;
+
+        let width = img_data.width as u32;
+        let height = img_data.height as u32;
+        let rgba_bytes: Vec<u8> = img_data.bytes.into_owned();
+
+        let buffer: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_raw(width, height, rgba_bytes)
+                .ok_or_else(|| "Failed to create image buffer from clipboard data.".to_string())?;
+
+        let preview_root = previews_dir(&app_clone)?;
+        let file_name = format!("{}-clipboard.png", timestamp_millis());
+        let destination = preview_root.join(&file_name);
+        buffer.save(&destination).map_err(|error| error.to_string())?;
+
+        Ok::<String, String>(destination.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let connection = open_db(&app)?;
+    let entry = get_entry_by_id(&connection, &entry_id)?
+        .ok_or_else(|| "Entry not found.".to_string())?;
+
+    let mut preview_images = entry.preview_images;
+    preview_images.push(PreviewImage {
+        id: Uuid::new_v4().to_string(),
+        path: saved_path,
+        order: preview_images.len() as i64,
+        created_at: now_iso(),
+        is_missing: false,
+    });
+
+    let input = VaultEntryInput {
+        title: entry.title,
+        description: entry.description,
+        r#type: entry.r#type,
+        tags: entry.tags,
+        stack: entry.stack,
+        root_path: entry.root_path,
+        entry_file_path: entry.entry_file_path,
+        preview_image_path: primary_preview_path(&preview_images),
+        preview_images,
+        is_favorite: entry.is_favorite,
+        is_pinned: entry.is_pinned,
+        is_template: entry.is_template,
+        notes: entry.notes,
+        good_for: entry.good_for,
+        setup_notes: entry.setup_notes,
+        dependency_notes: entry.dependency_notes,
+        run_command: entry.run_command,
+        status: entry.status,
+    };
+
+    update_entry_record(&connection, &entry_id, &input)
+}
+
+#[tauri::command]
 fn run_entry_command(root_path: String, command: String) -> RunCommandResult {
     let trimmed_command = command.trim();
     if trimmed_command.is_empty() {
@@ -4030,6 +4116,7 @@ pub fn run() {
             import_preview_image,
             open_path,
             copy_to_clipboard,
+            paste_clipboard_image,
             run_entry_command
         ])
         .run(tauri::generate_context!())

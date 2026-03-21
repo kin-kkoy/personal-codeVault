@@ -318,5 +318,6 @@ export type VaultApi = {
   importPreviewImage(): Promise<PreviewImportResult>
   openPath(targetPath: string): Promise<{ success: boolean; message?: string }>
   copyToClipboard(value: string): Promise<void>
+  pasteClipboardImage(entryId: string): Promise<VaultEntry>
   runEntryCommand(rootPath: string, command: string): Promise<{ success: boolean; message?: string }>
 }

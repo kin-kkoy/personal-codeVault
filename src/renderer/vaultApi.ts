@@ -87,6 +87,8 @@ export const vaultApi: VaultApi = {
   importPreviewImage: () => invoke('import_preview_image'),
   openPath: (targetPath: string) => invoke('open_path', { targetPath }),
   copyToClipboard: (value: string) => invoke('copy_to_clipboard', { value }),
+  pasteClipboardImage: (entryId: string) =>
+    invoke<VaultEntry>('paste_clipboard_image', { entryId }),
   runEntryCommand: (rootPath: string, command: string) =>
     invoke('run_entry_command', { rootPath, command })
 }
